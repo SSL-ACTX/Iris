@@ -1,15 +1,19 @@
 // src/py.rs
 //! Minimal PyO3 membrane entry
+//! Optimized for asynchronous service discovery and structured system messages.
 
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
 #[cfg(feature = "pyo3")]
 use pyo3::wrap_pyfunction;
 use std::os::raw::{c_void, c_char};
-use pyo3::types::PyTuple;
+use pyo3::types::{PyTuple, PyBytes};
 use pyo3::PyObject;
 use crate::buffer::{global_registry, BufferId};
 use std::sync::Arc;
+
+#[cfg(feature = "pyo3")]
+use pyo3_asyncio::tokio::future_into_py;
 
 #[cfg(feature = "pyo3")]
 #[pyfunction]
@@ -21,6 +25,7 @@ fn version() -> &'static str {
 fn populate_module(m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_class::<PyRuntime>()?;
+    m.add_class::<PySystemMessage>()?;
     #[cfg(feature = "pyo3")]
     m.add_function(wrap_pyfunction!(allocate_buffer, m)?)?;
     Ok(())
@@ -60,10 +65,20 @@ fn allocate_buffer(py: Python, size: usize) -> PyResult<PyObject> {
         }
 
         let memobj = PyObject::from_owned_ptr(py, mv as *mut pyo3::ffi::PyObject);
-        let capobj = PyObject::from_owned_ptr(py, capsule as *mut pyo3::ffi::PyObject);
         let idobj = id.into_py(py);
+        let capobj = PyObject::from_owned_ptr(py, capsule as *mut pyo3::ffi::PyObject);
         Ok(PyTuple::new(py, &[idobj, memobj, capobj]).into())
     }
+}
+
+/// Phase 7: Structured System Message for Python
+#[pyclass]
+#[derive(Clone)]
+pub struct PySystemMessage {
+    #[pyo3(get)]
+    pub type_name: String,
+    #[pyo3(get)]
+    pub target_pid: Option<u64>,
 }
 
 #[pyclass]
@@ -89,13 +104,28 @@ impl PyRuntime {
         Ok(self.inner.resolve(&name))
     }
 
-    /// Phase 7: Resolve a name on a remote node.
-    /// This blocks the Python thread until the remote query returns.
+    /// Phase 7: Resolve a name on a remote node (Synchronous/Blocking).
+    /// Detects if an active runtime exists. If so, uses block_in_place to avoid panics.
     fn resolve_remote(&self, addr: String, name: String) -> PyResult<Option<u64>> {
         let rt = self.inner.clone();
-        Ok(crate::RUNTIME.block_on(async {
-            rt.resolve_remote_async(addr, name).await
-        }))
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            // Must use block_in_place if we are already in a runtime thread
+            Ok(tokio::task::block_in_place(|| {
+                handle.block_on(rt.resolve_remote_async(addr, name))
+            }))
+        } else {
+            Ok(crate::RUNTIME.block_on(rt.resolve_remote_async(addr, name)))
+        }
+    }
+
+    /// Phase 7: Resolve a name on a remote node (Asynchronous).
+    /// Returns a Python Awaitable (Future) for use in asyncio loops.
+    fn resolve_remote_py<'py>(&self, py: Python<'py>, addr: String, name: String) -> PyResult<&'py PyAny> {
+        let rt = self.inner.clone();
+        future_into_py(py, async move {
+            let pid = rt.resolve_remote_async(addr, name).await;
+            Ok(pid)
+        })
     }
 
     /// Phase 5: Start a TCP listener on the specified address for remote message passing.
@@ -105,7 +135,7 @@ impl PyRuntime {
     }
 
     /// Phase 5: Send a binary payload to a PID on a remote node.
-    fn send_remote(&self, addr: String, pid: u64, data: &pyo3::types::PyBytes) -> PyResult<()> {
+    fn send_remote(&self, addr: String, pid: u64, data: &PyBytes) -> PyResult<()> {
         let bytes = bytes::Bytes::copy_from_slice(data.as_bytes());
         self.inner.send_remote(addr, pid, bytes);
         Ok(())
@@ -118,13 +148,23 @@ impl PyRuntime {
     }
 
     /// Quick network probe to check if a node is reachable.
+    /// Returns a boolean directly from the future to avoid type inference issues.
     fn is_node_up(&self, addr: String) -> PyResult<bool> {
-        crate::RUNTIME.block_on(async {
+        let fut = async {
             match tokio::net::TcpStream::connect(&addr).await {
-                Ok(_) => Ok(true),
-                                Err(_) => Ok(false),
+                Ok(_) => true,
+                Err(_) => false,
             }
-        })
+        };
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            // Must use block_in_place to prevent "runtime within runtime" panic
+            Ok(tokio::task::block_in_place(|| {
+                handle.block_on(fut)
+            }))
+        } else {
+            Ok(crate::RUNTIME.block_on(fut))
+        }
     }
 
     fn join(&self, py: Python, pid: u64) -> PyResult<()> {
@@ -181,30 +221,45 @@ impl PyRuntime {
                         Python::with_gil(|py| {
                             let guard = b.read();
                             let cb = guard.as_ref(py);
-                            let pybytes = pyo3::types::PyBytes::new(py, &bytes);
+                            let pybytes = PyBytes::new(py, &bytes);
                             if let Err(e) = cb.call1((pybytes,)) {
                                 eprintln!("[Myrmidon] Python actor exception: {}", e);
                                 e.print(py);
                             }
                         });
                     }
-                    _ => {}
+                    crate::mailbox::Message::System(crate::mailbox::SystemMessage::Exit(pid)) => {
+                        let _ = pid;
+                    }
                 }
             }
         };
         Ok(self.inner.spawn_handler_with_budget(handler, budget))
     }
 
-    fn send(&self, pid: u64, data: &pyo3::types::PyBytes) -> pyo3::PyResult<bool> {
+    fn send(&self, pid: u64, data: &PyBytes) -> PyResult<bool> {
         let msg = bytes::Bytes::copy_from_slice(data.as_bytes());
         Ok(self.inner.send(pid, crate::mailbox::Message::User(msg)).is_ok())
     }
 
-    fn get_messages(&self, py: Python, pid: u64) -> pyo3::PyResult<Vec<pyo3::PyObject>> {
+    /// Retrieves messages from an observed actor.
+    /// Now maps Message::System to PySystemMessage objects.
+    fn get_messages(&self, py: Python, pid: u64) -> PyResult<Vec<PyObject>> {
         if let Some(vec) = self.inner.get_observed_messages(pid) {
-            let out = vec.into_iter().filter_map(|m| match m {
-                crate::mailbox::Message::User(b) => Some(pyo3::types::PyBytes::new(py, &b).into()),
-                                                 _ => None,
+            let out = vec.into_iter().map(|m| match m {
+                crate::mailbox::Message::User(b) => PyBytes::new(py, &b).into_py(py),
+                                          crate::mailbox::Message::System(crate::mailbox::SystemMessage::Exit(target)) => {
+                                              PySystemMessage {
+                                                  type_name: "EXIT".to_string(),
+                                          target_pid: Some(target),
+                                              }.into_py(py)
+                                          }
+                                          crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(_)) => {
+                                              PySystemMessage {
+                                                  type_name: "HOT_SWAP".to_string(),
+                                          target_pid: None,
+                                              }.into_py(py)
+                                          }
             }).collect();
             Ok(out)
         } else {

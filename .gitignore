@@ -5,3 +5,5 @@ target/
 Cargo.lock
 __pycache__/
 *.so
+
+test.py

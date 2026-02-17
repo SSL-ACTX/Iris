@@ -1,7 +1,7 @@
 // src/network.rs
 //! Phase 5 & 7: Distributed Networking and Remote Resolution
 
-use crate::mailbox::{Message, SystemMessage};
+use crate::mailbox::Message;
 use crate::pid::Pid;
 use bytes::{Bytes, BytesMut, Buf, BufMut};
 use std::sync::Arc;
