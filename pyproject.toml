@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "myrmidon"
+version = "0.1.0"
+description = "A lightweight, embedded actor mesh."
+authors = [{name = "Seuriin", email = "seuriin@gmail.com"}]
+license = {file = "LICENSE"}
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+]
+requires-python = ">=3.7"
+dependencies = []
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
