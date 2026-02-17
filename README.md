@@ -33,15 +33,16 @@ Update your application logic while it is running.
 * **Zero Downtime:** Swap out a Python handler function in memory without stopping the actor or losing its mailbox state.
 * **Safe Transition:** Future messages are processed by the new logic instantly; current messages finish processing under the old logic.
 
-### 🌐 Global Service Discovery
+### 🌐 Global Service Discovery (Phase 7 Enhanced)
 Actors are first-class citizens of the network.
 * **Name Registry:** Register actors with human-readable strings (e.g., `"auth-provider"`) instead of tracking numeric PIDs.
-* **Remote Resolution:** Query any node in the cluster to find a service PID.
+* **Async Discovery:** Resolve remote service PIDs using native Python `await` without blocking the event loop.
 * **Location Transparency:** Send messages to actors whether they reside on the local CPU or a server across the globe.
 
 ### 🛡️ Distributed Supervision
 Built-in fault tolerance modeled after the "Let it Crash" philosophy.
-* **Remote Monitoring:** A node can "watch" a remote PID. If the network drops or the remote process crashes, the local supervisor is notified instantly.
+* **Structured System Messages:** Actor exits and hot-swaps are delivered as `PySystemMessage` objects, providing rich context for supervisor logic.
+* **Remote Monitoring:** A node can "watch" a remote PID. If the network drops or the remote process crashes, the local supervisor is notified.
 * **Restart Strategies:** Define `RestartOne` or `RestartAll` logic to automatically recover from failures.
 
 ### 🚀 Zero-Copy Memory Management
@@ -72,6 +73,7 @@ Myrmidon uses a proprietary length-prefixed binary protocol over TCP for inter-n
 
 ### Memory Safety & FFI
 By using **PyO3** and **Tokio**, Myrmidon bridges the gap between Rust’s memory safety and Python’s rapid development:
+* **Membrane Hardening:** The runtime uses `block_in_place` to safely handle synchronous Python calls from within asynchronous Rust contexts.
 * **GIL Awareness:** The runtime carefully manages the Python Global Interpreter Lock to ensure Rust networking threads never block Python execution.
 * **Atomic RwLocks:** Actor behaviors are protected by thread-safe pointer swaps, ensuring hot-swapping is thread-safe.
 
@@ -99,23 +101,41 @@ maturin develop --release
 
 ## Usage Examples
 
-### 1. Simple Local Actor
+### 1. Async Service Discovery (Phase 7)
 
 ```python
+import asyncio
 import myrmidon
 
-rt = myrmidon.Runtime()
+rt = myrmidon.PyRuntime()
 
-def my_handler(msg):
-    print(f"Received: {msg.decode()}")
+async def find_and_query():
+    # Resolve a remote service PID without blocking the asyncio loop
+    addr = "127.0.0.1:9000"
+    target_pid = await rt.resolve_remote_py(addr, "auth-service")
+    
+    if target_pid:
+        rt.send_remote(addr, target_pid, b"verify_token")
 
-# Spawn with a budget of 100 reductions
-pid = rt.spawn(my_handler, budget=100)
-rt.send(pid, b"Hello Myrmidon!")
+asyncio.run(find_and_query())
 
 ```
 
-### 2. Hot-Swapping Logic
+### 2. Structured System Messages
+
+```python
+# Messages from an observed actor can be data or system events
+messages = rt.get_messages(observer_pid)
+
+for msg in messages:
+    if isinstance(msg, myrmidon.PySystemMessage):
+        print(f"System Event: {msg.type_name} for PID {msg.target_pid}")
+    else:
+        print(f"User Data: {msg.decode()}")
+
+```
+
+### 3. Hot-Swapping Logic
 
 ```python
 def behavior_a(msg):
@@ -124,7 +144,7 @@ def behavior_a(msg):
 def behavior_b(msg):
     print("Logic B (Upgraded!)")
 
-pid = rt.spawn(behavior_a)
+pid = rt.spawn_py_handler(behavior_a, budget=10)
 rt.send(pid, b"test") # Prints "Logic A"
 
 # Atomic swap to behavior_b
@@ -132,29 +152,6 @@ rt.hot_swap(pid, behavior_b)
 rt.send(pid, b"test") # Prints "Logic B (Upgraded!)"
 
 ```
-
-### 3. Service Discovery
-
-```python
-# On Node A (127.0.0.1:9000)
-rt.listen("127.0.0.1:9000")
-pid = rt.spawn(my_handler)
-rt.register("logger", pid)
-
-# On Node B
-target_pid = rt.resolve_remote("127.0.0.1:9000", "logger")
-rt.send_remote("127.0.0.1:9000", target_pid, b"Log this message")
-
-```
-
----
-
-## The Distributed Mesh
-
-Myrmidon nodes automatically form a mesh network.
-
-* **Resilience:** If Node A monitors Node B and the connection fails, Node A can trigger an automatic failover.
-* **Scalability:** Scale your Python application horizontally by simply spawning actors on new nodes and registering them in the global namespace.
 
 ---
 
