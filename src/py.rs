@@ -11,6 +11,8 @@ use pyo3::types::{PyTuple, PyBytes};
 use pyo3::PyObject;
 use crate::buffer::{global_registry, BufferId};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex as TokioMutex;
 
 #[cfg(feature = "pyo3")]
 use pyo3_asyncio::tokio::future_into_py;
@@ -26,6 +28,7 @@ fn populate_module(m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_class::<PyRuntime>()?;
     m.add_class::<PySystemMessage>()?;
+    m.add_class::<PyMailbox>()?;
     #[cfg(feature = "pyo3")]
     m.add_function(wrap_pyfunction!(allocate_buffer, m)?)?;
     Ok(())
@@ -80,6 +83,129 @@ pub struct PySystemMessage {
     #[pyo3(get)]
     pub target_pid: Option<u64>,
 }
+
+/// Helper to convert a Rust `Message` to a Python object.
+fn message_to_py(py: Python, msg: crate::mailbox::Message) -> PyObject {
+    match msg {
+        crate::mailbox::Message::User(b) => PyBytes::new(py, &b).into_py(py),
+        crate::mailbox::Message::System(crate::mailbox::SystemMessage::Exit(target)) => {
+            PySystemMessage { type_name: "EXIT".to_string(), target_pid: Some(target) }.into_py(py)
+        }
+        crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(_)) =>
+            PySystemMessage { type_name: "HOT_SWAP".to_string(), target_pid: None }.into_py(py),
+        crate::mailbox::Message::System(crate::mailbox::SystemMessage::Ping) =>
+            PySystemMessage { type_name: "PING".to_string(), target_pid: None }.into_py(py),
+        crate::mailbox::Message::System(crate::mailbox::SystemMessage::Pong) =>
+            PySystemMessage { type_name: "PONG".to_string(), target_pid: None }.into_py(py),
+    }
+}
+
+/// Run a Python matcher against a Rust message.
+fn run_python_matcher(py: Python, matcher: &PyObject, msg: &crate::mailbox::Message) -> bool {
+    match msg {
+        crate::mailbox::Message::User(b) => {
+            match matcher.call1(py, (PyBytes::new(py, &b),)) {
+                Ok(val) => val.extract::<bool>(py).unwrap_or(false),
+                Err(_) => false,
+            }
+        }
+        crate::mailbox::Message::System(s) => {
+            match s {
+                crate::mailbox::SystemMessage::Exit(target) => {
+                    let obj = PySystemMessage { type_name: "EXIT".to_string(), target_pid: Some(*target) };
+                    match matcher.call1(py, (obj.into_py(py),)) {
+                        Ok(val) => val.extract::<bool>(py).unwrap_or(false),
+                        Err(_) => false,
+                    }
+                }
+                crate::mailbox::SystemMessage::HotSwap(_) => {
+                    let obj = PySystemMessage { type_name: "HOT_SWAP".to_string(), target_pid: None };
+                    match matcher.call1(py, (obj.into_py(py),)) {
+                        Ok(val) => val.extract::<bool>(py).unwrap_or(false),
+                        Err(_) => false,
+                    }
+                }
+                crate::mailbox::SystemMessage::Ping => {
+                    let obj = PySystemMessage { type_name: "PING".to_string(), target_pid: None };
+                    match matcher.call1(py, (obj.into_py(py),)) {
+                        Ok(val) => val.extract::<bool>(py).unwrap_or(false),
+                        Err(_) => false,
+                    }
+                }
+                crate::mailbox::SystemMessage::Pong => {
+                    let obj = PySystemMessage { type_name: "PONG".to_string(), target_pid: None };
+                    match matcher.call1(py, (obj.into_py(py),)) {
+                        Ok(val) => val.extract::<bool>(py).unwrap_or(false),
+                        Err(_) => false,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A wrapper around a live MailboxReceiver for Python actors.
+#[pyclass]
+#[derive(Clone)]
+pub struct PyMailbox {
+    inner: Arc<TokioMutex<crate::mailbox::MailboxReceiver>>,
+}
+
+#[pymethods]
+impl PyMailbox {
+    /// Receive the next message (awaitable).
+    fn recv<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<&'py PyAny> {
+        let rx = self.inner.clone();
+        future_into_py(py, async move {
+            let fut = async {
+                let mut guard = rx.lock().await;
+                guard.recv().await
+            };
+
+            let res = if let Some(sec) = timeout {
+                match tokio::time::timeout(Duration::from_secs_f64(sec), fut).await {
+                    Ok(val) => val,
+                    Err(_) => return Ok(Python::with_gil(|py| py.None())), // Timeout
+                }
+            } else {
+                fut.await
+            };
+
+            match res {
+                Some(msg) => Ok(Python::with_gil(|py| message_to_py(py, msg))),
+                None => Ok(Python::with_gil(|py| py.None())),
+            }
+        })
+    }
+
+    /// Selectively receive a message matching a Python predicate (awaitable).
+    fn selective_recv<'py>(&self, py: Python<'py>, matcher: PyObject, timeout: Option<f64>) -> PyResult<&'py PyAny> {
+        let rx = self.inner.clone();
+        future_into_py(py, async move {
+            let fut = async {
+                let mut guard = rx.lock().await;
+                guard.selective_recv(|msg| {
+                    Python::with_gil(|py| run_python_matcher(py, &matcher, msg))
+                }).await
+            };
+
+            let res = if let Some(sec) = timeout {
+                match tokio::time::timeout(Duration::from_secs_f64(sec), fut).await {
+                    Ok(val) => val,
+                    Err(_) => return Ok(Python::with_gil(|py| py.None())), // Timeout
+                }
+            } else {
+                fut.await
+            };
+
+            match res {
+                Some(msg) => Ok(Python::with_gil(|py| message_to_py(py, msg))),
+                None => Ok(Python::with_gil(|py| py.None())),
+            }
+        })
+    }
+}
+
 
 #[pyclass]
 struct PyRuntime {
@@ -198,6 +324,8 @@ impl PyRuntime {
         }
     }
 
+    /// Spawns a push-based actor (original behavior).
+    /// The `py_callable` is called with each message as an argument.
     fn spawn_py_handler(&self, py_callable: PyObject, budget: usize) -> PyResult<u64> {
         let behavior = Arc::new(parking_lot::RwLock::new(py_callable));
 
@@ -240,42 +368,71 @@ impl PyRuntime {
         Ok(self.inner.spawn_handler_with_budget(handler, budget))
     }
 
+    /// Spawns a pull-based actor.
+    /// The `py_callable` is called ONCE with a `PyMailbox` object.
+    /// The Python code is responsible for writing the loop and pulling messages.
+    fn spawn_with_mailbox(&self, py_callable: PyObject, budget: usize) -> PyResult<u64> {
+        let pid = self.inner.spawn_actor_with_budget(move |rx| async move {
+            let mailbox = PyMailbox {
+                inner: Arc::new(TokioMutex::new(rx))
+            };
+            
+            if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                return;
+            }
+
+            Python::with_gil(|py| {
+                if let Err(e) = py_callable.call1(py, (mailbox,)) {
+                     eprintln!("[Myrmidon] Python mailbox actor exception: {}", e);
+                     e.print(py);
+                }
+            });
+        }, budget);
+
+        Ok(pid)
+    }
+
     fn send(&self, pid: u64, data: &PyBytes) -> PyResult<bool> {
         let msg = bytes::Bytes::copy_from_slice(data.as_bytes());
         Ok(self.inner.send(pid, crate::mailbox::Message::User(msg)).is_ok())
     }
 
+    /// Await selectively on observed messages for `pid` using a Python callable.
+    /// Now supports optional timeout (in seconds).
+    fn selective_recv_observed_py<'py>(&self, py: Python<'py>, pid: u64, matcher: PyObject, timeout: Option<f64>) -> PyResult<&'py PyAny> {
+        let rt = self.inner.clone();
+        future_into_py(py, async move {
+            let op = async {
+                loop {
+                    // Attempt to take a matching observed message atomically.
+                    if let Some(m) = rt.take_observed_message_matching(pid, |msg| {
+                        // Call into Python matcher to decide.
+                        Python::with_gil(|py| run_python_matcher(py, &matcher, msg))
+                    }) {
+                        // Convert the message into a Python object before returning.
+                        return Python::with_gil(|py| message_to_py(py, m));
+                    }
+
+                    // Not found yet — yield a bit and try again.
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            };
+
+            if let Some(sec) = timeout {
+                match tokio::time::timeout(Duration::from_secs_f64(sec), op).await {
+                    Ok(val) => Ok(val),
+                    Err(_) => Ok(Python::with_gil(|py| py.None()))
+                }
+            } else {
+                Ok(op.await)
+            }
+        })
+    }
+
     /// Retrieves messages from an observed actor.
-    /// Maps Message::System variants to PySystemMessage objects.
     fn get_messages(&self, py: Python, pid: u64) -> PyResult<Vec<PyObject>> {
         if let Some(vec) = self.inner.get_observed_messages(pid) {
-            let out = vec.into_iter().map(|m| match m {
-                crate::mailbox::Message::User(b) => PyBytes::new(py, &b).into_py(py),
-                                          crate::mailbox::Message::System(crate::mailbox::SystemMessage::Exit(target)) => {
-                                              PySystemMessage {
-                                                  type_name: "EXIT".to_string(),
-                                          target_pid: Some(target),
-                                              }.into_py(py)
-                                          }
-                                          crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(_)) => {
-                                              PySystemMessage {
-                                                  type_name: "HOT_SWAP".to_string(),
-                                          target_pid: None,
-                                              }.into_py(py)
-                                          }
-                                          crate::mailbox::Message::System(crate::mailbox::SystemMessage::Ping) => {
-                                              PySystemMessage {
-                                                  type_name: "PING".to_string(),
-                                          target_pid: None,
-                                              }.into_py(py)
-                                          }
-                                          crate::mailbox::Message::System(crate::mailbox::SystemMessage::Pong) => {
-                                              PySystemMessage {
-                                                  type_name: "PONG".to_string(),
-                                          target_pid: None,
-                                              }.into_py(py)
-                                          }
-            }).collect();
+            let out = vec.into_iter().map(|m| message_to_py(py, m)).collect();
             Ok(out)
         } else {
             Ok(Vec::new())

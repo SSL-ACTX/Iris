@@ -313,6 +313,21 @@ impl Runtime {
         self.observers.get(&pid).map(|entry| entry.value().lock().unwrap().clone())
     }
 
+    /// Remove and return a single observed message matching the predicate.
+    /// Used by FFI helpers to implement selective receive for observed actors.
+    pub fn take_observed_message_matching<F>(&self, pid: Pid, mut matcher: F) -> Option<mailbox::Message>
+    where
+        F: FnMut(&mailbox::Message) -> bool,
+    {
+        if let Some(entry) = self.observers.get(&pid) {
+            let mut guard = entry.value().lock().unwrap();
+            if let Some(pos) = guard.iter().position(|m| matcher(m)) {
+                return Some(guard.remove(pos));
+            }
+        }
+        None
+    }
+
     pub fn send(&self, pid: Pid, msg: mailbox::Message) -> Result<(), mailbox::Message> {
         if let Some(sender) = self.mailboxes.get(&pid) {
             sender.send(msg)
