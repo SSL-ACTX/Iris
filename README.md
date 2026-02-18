@@ -23,6 +23,11 @@ Unlike standard message queues or microservice frameworks, Myrmidon implements a
 
 ## Core Capabilities
 
+### ⚡ Hybrid Actor Model (Push & Pull)
+Myrmidon supports two distinct actor patterns to balance raw speed with developer convenience:
+* **Push Actors (Default):** Extremely lightweight. Rust "pushes" messages to a Python callback only when data arrives. Zero idle overhead; ideal for high-throughput workers.
+* **Pull Actors (Mailbox):** Specialized `async/await` actors that "pull" messages from a `PyMailbox`. These run inside their own `asyncio` loop, allowing for complex orchestration flows (e.g., "send request, sleep 5s, await response").
+
 ### ⚡ Reduction-Based Scheduler
 Inspired by the BEAM (Erlang VM), Myrmidon uses a **Cooperative Reduction Scheduler**.
 * **Fairness:** Every actor is assigned a "reduction budget." Once exhausted, the runtime automatically yields the thread to ensure no single actor can starve the system.
@@ -44,11 +49,6 @@ Built-in fault tolerance modeled after the "Let it Crash" philosophy.
 * **Heartbeat Monitoring:** The mesh automatically sends `PING`/`PONG` signals (0x02/0x03) to detect silent failures (e.g., GIL freezes or half-open TCP connections).
 * **Structured System Messages:** Actor exits, hot-swaps, and heartbeats are delivered as `PySystemMessage` objects, providing rich context for supervisor logic.
 * **Self-Healing Factories:** Use `supervise_with_factory` to define Python closures that automatically re-resolve and restart connections when a remote node comes back online.
-
-### 🚀 Zero-Copy Memory Management
-Optimized for high-throughput data processing.
-* **Slab Allocation:** Uses a high-performance slab allocator for PIDs and internal buffers to minimize heap fragmentation.
-* **Shared Buffers:** Move large datasets between actors using `BufferID` handles, avoiding expensive serialization/deserialization.
 
 ---
 
@@ -102,11 +102,59 @@ maturin develop --release
 
 ## Usage Examples
 
-### 1. Async Service Discovery
+### 1. High-Performance Push Actors (Recommended)
+
+Use `spawn` for maximum throughput. Rust owns the scheduling and only invokes Python when a message arrives.
+
+```python
+import myrmidon
+
+rt = myrmidon.Runtime()
+
+def fast_worker(msg):
+    # Rust calls this function efficiently
+    print(f"Processed: {msg}")
+
+# Spawn 1000 workers instantly
+for _ in range(1000):
+    rt.spawn(fast_worker, budget=50)
+
+```
+
+### 2. Async Pull Actors (Orchestration)
+
+Use `spawn_with_mailbox` for complex logic that requires `await`, timers, or specific message ordering.
+*Note: These actors hold a dedicated thread and should be used sparingly for orchestration.*
 
 ```python
 import asyncio
-import myrmidon
+
+async def saga_coordinator(mailbox):
+    # 1. Wait for initial trigger
+    msg = await mailbox.recv()
+    print("Starting Saga...")
+
+    # 2. Selective Receive: Wait specifically for 'CONFIRM' message, skipping others
+    def confirmation_matcher(m):
+        return m == b"CONFIRM"
+    
+    try:
+        # Wait up to 5 seconds for confirmation
+        confirm = await mailbox.selective_recv(confirmation_matcher, timeout=5.0)
+        if confirm:
+            print("Saga Confirmed!")
+    except Exception:
+        print("Saga Timed Out")
+
+# Spawn the async actor
+rt.spawn_with_mailbox(saga_coordinator, budget=100)
+
+```
+
+### 3. Async Service Discovery
+
+```python
+import asyncio
 
 rt = myrmidon.Runtime()
 
@@ -122,7 +170,7 @@ asyncio.run(find_and_query())
 
 ```
 
-### 2. Structured System Messages
+### 4. Structured System Messages
 
 ```python
 # Messages from an observed actor can be data or system events
@@ -139,7 +187,7 @@ for msg in messages:
 
 ```
 
-### 3. Hot-Swapping Logic
+### 5. Hot-Swapping Logic
 
 ```python
 def behavior_a(msg):
@@ -154,26 +202,6 @@ rt.send(pid, b"test") # Prints "Logic A"
 # Atomic swap to behavior_b
 rt.hot_swap(pid, behavior_b)
 rt.send(pid, b"test") # Prints "Logic B (Upgraded!)"
-
-```
-
-### 4. Self-Healing Supervisor
-
-```python
-def connection_factory():
-    """Polls for a remote service and returns a local proxy actor."""
-    while True:
-        try:
-            target = rt.resolve_remote("127.0.0.1:9000", "database")
-            if target:
-                rt.monitor_remote("127.0.0.1:9000", target)
-                # Return a new handler that forwards messages
-                return rt.spawn(lambda msg: rt.send_remote("...", target, msg))
-        except:
-            time.sleep(1)
-
-# If the connection drops, this factory is automatically re-run
-rt._inner.supervise_with_factory(proxy_pid, connection_factory, "RestartOne")
 
 ```
 
@@ -197,8 +225,8 @@ Supported. Ensure you have the latest Microsoft C++ Build Tools installed for Py
 
 > [!IMPORTANT]
 > **Production Status:** Myrmidon is currently in **Alpha**.
+> * **Push vs Pull:** Prefer `spawn()` (Push) for performance. `spawn_with_mailbox()` (Pull) creates a per-actor Python event loop and pins a thread; use it only for specialized orchestration actors.
 > * The binary protocol is subject to change.
-> * Performance tuning for million-actor benchmarks is ongoing.
 > * Always use the `Supervisor` for critical actor lifecycles to ensure automatic recovery.
 > 
 > 
@@ -207,7 +235,7 @@ Supported. Ensure you have the latest Microsoft C++ Build Tools installed for Py
 
 <div align="center">
 
-**Author:** Seuriin ([SSL-ACTX]())
+**Author:** Seuriin ([SSL-ACTX](https://www.google.com/search?q=))
 
 *v0.1.1*
 
