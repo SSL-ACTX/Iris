@@ -1,4 +1,4 @@
-// lib.rs
+// src/lib.rs
 //! Myrmidon — core runtime (Phase 1-7)
 //!
 //! This crate contains the core logic for PID allocation, mailboxes,
@@ -15,6 +15,9 @@ pub mod registry;
 
 #[cfg(feature = "pyo3")]
 pub mod py;
+
+#[cfg(feature = "node")]
+pub mod node;
 
 use crate::pid::Pid;
 use dashmap::DashMap;

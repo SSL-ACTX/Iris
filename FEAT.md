@@ -6,7 +6,7 @@
 
 ## 🟣 Core Actor Semantics (BEAM-Inspired)
 
-* [ ] **Selective Receive**
+* [x] **Selective Receive**
   Actors can pattern-match and defer messages until a desired one arrives.
 
 * [ ] **Exit Reasons & Crash Metadata**

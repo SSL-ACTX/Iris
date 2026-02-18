@@ -1,0 +1,31 @@
+{
+  "name": "myrmidon",
+  "version": "0.1.2",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "myrmidon",
+    "triples": {
+      "defaults": true,
+      "additional": [
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-gnu",
+        "i686-pc-windows-msvc",
+        "armv7-unknown-linux-gnueabihf",
+        "aarch64-apple-darwin",
+        "aarch64-linux-android"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "napi build --platform --release --strip --features node --cargo-flags=--no-default-features",
+    "build:debug": "napi build --platform --features node --cargo-flags=--no-default-features",
+    "test": "node tests/test.js"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.16.0"
+  },
+  "engines": {
+    "node": ">= 10"
+  }
+}

@@ -1,6 +1,7 @@
 // src/py.rs
 //! Minimal PyO3 membrane entry
 //! Optimized for asynchronous service discovery and structured system messages.
+#![allow(non_local_definitions)]
 
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
