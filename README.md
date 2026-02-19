@@ -270,6 +270,86 @@ messages.forEach(msg => {
 
 ```
 
+### 5. Mailbox Introspection & Timers
+
+Myrmidon exposes lightweight mailbox introspection and actor-local timers so guest languages can inspect queue sizes and schedule timed messages.
+
+#### Mailbox Introspection
+
+- **Rust:** `Runtime::mailbox_size(pid: u64) -> Option<usize>` returns the number of user messages queued for `pid` (excludes system messages).
+- **Python:** `rt.mailbox_size(pid)` mirrors the Rust API and returns `None` if the PID is unknown.
+
+Python example:
+
+```python
+size = rt.mailbox_size(pid)
+print(f"Mailbox size for {pid}: {size}")
+```
+
+#### Actor-local Timers
+
+You can schedule one-shot or repeating messages to an actor's mailbox. Timers are cancellable via an id returned at creation.
+
+- **Rust APIs:** `send_after(pid, delay_ms, payload)`, `send_interval(pid, interval_ms, payload)`, `cancel_timer(timer_id)`
+- **Python:** `rt.send_after(pid, ms, b'data')`, `rt.send_interval(pid, ms, b'data')`, `rt.cancel_timer(timer_id)`
+
+Python example (one-shot):
+
+```python
+timer_id = rt.send_after(pid, 200, b'tick')  # send 'tick' after 200ms
+
+# cancel if needed
+rt.cancel_timer(timer_id)
+```
+
+Python example (repeating):
+
+```python
+timer_id = rt.send_interval(pid, 1000, b'heartbeat')  # every 1s
+
+# stop later
+rt.cancel_timer(timer_id)
+```
+
+---
+
+### 6. Exit Reasons (Structured)
+
+When an actor exits the runtime sends a structured `EXIT` system message that includes the reason and optional metadata. This allows supervisors and link/watch logic to make informed decisions.
+
+Common `ExitReason` variants:
+- `Normal` — actor finished cleanly.
+- `Killed` — requested shutdown.
+- `Panic` — runtime detected a panic; `ExitInfo` may include panic metadata.
+- `Crash` — user code returned an unrecoverable error.
+
+Python example receiving exit info:
+
+```python
+for msg in rt.get_messages(supervisor_pid):
+    if isinstance(msg, myrmidon.PySystemMessage) and msg.type_name == 'EXIT':
+        print('from:', msg.from_pid)
+        print('target:', msg.target_pid)
+        print('reason:', msg.reason)        # e.g. 'Normal' | 'Panic' | 'Killed'
+        print('metadata:', msg.metadata)    # optional dict/bytes with extra info
+
+```
+
+Node.js receives `system` objects with the same fields: `fromPid`, `targetPid`, `reason`, and optional `metadata`.
+
+---
+
+### 7. Runtime Configuration APIs (programmatic)
+
+In addition to the environment variables documented above, the Python runtime exposes programmatic setters:
+
+- `rt.set_release_gil_limits(max_threads: int, gil_pool_size: int)` — set the per-process cap and fallback pool size at runtime.
+- `rt.set_release_gil_strict(strict: bool)` — when `true` a `spawn(..., release_gil=True)` will return an error if the dedicated-thread cap is reached instead of falling back to the shared pool.
+
+These mirror the behavior of `MYRMIDON_MAX_RELEASE_GIL_THREADS` and `MYRMIDON_GIL_POOL_SIZE` but allow dynamic tuning from the host language.
+
+---
+
 ### 5. Hot-Swapping Logic
 
 #### Python
