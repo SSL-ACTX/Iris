@@ -131,6 +131,19 @@ class Runtime:
         """Start TCP server for remote messages and name resolution."""
         self._inner.listen(addr)
 
+    def set_release_gil_limits(self, max_threads: int, pool_size: int):
+        """Set programmatic limits for `release_gil` behavior.
+
+        Args:
+            max_threads: Max number of dedicated per-actor GIL threads.
+            pool_size: Size of the shared GIL worker pool used as fallback.
+        """
+        self._inner.set_release_gil_limits(max_threads, pool_size)
+
+    def set_release_gil_strict(self, strict: bool):
+        """When True, spawning with `release_gil=True` returns an error if limits are exceeded."""
+        self._inner.set_release_gil_strict(strict)
+
     def send_remote(self, addr: str, pid: int, data: bytes):
         """Send data to a PID on a remote node."""
         self._inner.send_remote(addr, pid, data)

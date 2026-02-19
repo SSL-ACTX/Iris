@@ -42,6 +42,10 @@ pub struct Runtime {
     observers: Arc<DashMap<Pid, Arc<Mutex<Vec<mailbox::Message>>>>>,
     network: Arc<Mutex<Option<network::NetworkManager>>>,
     registry: Arc<registry::NameRegistry>,
+    // Runtime-configurable limits for Python GIL-release behavior
+    release_gil_max_threads: Arc<Mutex<usize>>,
+    gil_pool_size: Arc<Mutex<usize>>,
+    release_gil_strict: Arc<Mutex<bool>>,
 }
 
 impl Runtime {
@@ -59,12 +63,37 @@ impl Runtime {
             observers: Arc::new(DashMap::new()),
             network: Arc::new(Mutex::new(None)),
             registry: Arc::new(registry::NameRegistry::new()),
+            release_gil_max_threads: Arc::new(Mutex::new(256)),
+            gil_pool_size: Arc::new(Mutex::new(8)),
+            release_gil_strict: Arc::new(Mutex::new(false)),
         };
 
         let net_manager = network::NetworkManager::new(Arc::new(rt.clone()));
         *rt.network.lock().unwrap() = Some(net_manager);
 
         rt
+    }
+
+    /// Set runtime limits for GIL release handling.
+    pub fn set_release_gil_limits(&self, max_threads: usize, pool_size: usize) {
+        *self.release_gil_max_threads.lock().unwrap() = max_threads;
+        *self.gil_pool_size.lock().unwrap() = pool_size;
+    }
+
+    /// Enable or disable strict failure mode: when true, spawning an actor with
+    /// `release_gil=true` will return an error if the dedicated-thread limit is exceeded.
+    pub fn set_release_gil_strict(&self, strict: bool) {
+        *self.release_gil_strict.lock().unwrap() = strict;
+    }
+
+    /// Get the current release_gil limits (max_threads, pool_size).
+    pub fn get_release_gil_limits(&self) -> (usize, usize) {
+        (*self.release_gil_max_threads.lock().unwrap(), *self.gil_pool_size.lock().unwrap())
+    }
+
+    /// Returns whether strict failure mode is enabled.
+    pub fn is_release_gil_strict(&self) -> bool {
+        *self.release_gil_strict.lock().unwrap()
     }
 
     // --- Name Registry ---

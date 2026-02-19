@@ -302,6 +302,18 @@ impl PyRuntime {
         Ok(())
     }
 
+    /// Configure release_gil runtime limits programmatically.
+    fn set_release_gil_limits(&self, max_threads: usize, pool_size: usize) -> PyResult<()> {
+        self.inner.set_release_gil_limits(max_threads, pool_size);
+        Ok(())
+    }
+
+    /// Enable or disable strict failure mode for release_gil (error on limit exceeded).
+    fn set_release_gil_strict(&self, strict: bool) -> PyResult<()> {
+        self.inner.set_release_gil_strict(strict);
+        Ok(())
+    }
+
     /// Phase 5: Send a binary payload to a PID on a remote node.
     fn send_remote(&self, addr: String, pid: u64, data: &PyBytes) -> PyResult<()> {
         let bytes = bytes::Bytes::copy_from_slice(data.as_bytes());
@@ -436,25 +448,22 @@ impl PyRuntime {
         // spawn_blocking overhead and blocking-pool saturation. If we exceed the
         // dedicated-thread limit we fall back to a shared GIL worker pool.
         let maybe_tx = if release {
-            // Read configurable limits from env
-            let max_threads = std::env::var("MYRMIDON_MAX_RELEASE_GIL_THREADS").ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(DEFAULT_MAX_RELEASE_GIL_THREADS);
+                // Read configurable limits from the Runtime instance
+                let (max_threads, pool_size) = self.inner.get_release_gil_limits();
+                let strict = self.inner.is_release_gil_strict();
 
-            let pool_size = std::env::var("MYRMIDON_GIL_POOL_SIZE").ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(DEFAULT_GIL_POOL_SIZE);
-
-            // Enforce global limit for dedicated threads
-            let prev = RELEASE_GIL_THREADS.fetch_add(1, Ordering::SeqCst);
-            if prev >= max_threads {
-                // Reached limit: decrement counter and use shared pool instead
-                RELEASE_GIL_THREADS.fetch_sub(1, Ordering::SeqCst);
-                // Initialize or get global pool
-                let _ = GIL_WORKER_POOL.get_or_init(|| Arc::new(GilPool::new(pool_size))).clone();
-                // We'll use shared pool: no dedicated per-actor tx
-                None
-            } else {
+                // Enforce global limit for dedicated threads
+                let prev = RELEASE_GIL_THREADS.fetch_add(1, Ordering::SeqCst);
+                if prev >= max_threads {
+                    // Reached limit: decrement counter
+                    RELEASE_GIL_THREADS.fetch_sub(1, Ordering::SeqCst);
+                    if strict {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err("release_gil thread limit exceeded"));
+                    }
+                    // Use shared pool as a fallback
+                    let _ = GIL_WORKER_POOL.get_or_init(|| Arc::new(GilPool::new(pool_size))).clone();
+                    None
+                } else {
                 let (tx, rx) = cb_channel::unbounded::<crate::mailbox::Message>();
                 let b_thread = behavior.clone();
 
