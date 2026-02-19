@@ -74,6 +74,12 @@ impl Runtime {
         self.registry.register(name, pid);
     }
 
+    /// Unregister a named actor locally.
+    /// This was missing and caused the compilation error.
+    pub fn unregister(&self, name: &str) {
+        self.registry.unregister(name);
+    }
+
     /// Resolve a human-readable name to a PID.
     pub fn resolve(&self, name: &str) -> Option<Pid> {
         self.registry.resolve(name)

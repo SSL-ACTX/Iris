@@ -13,7 +13,7 @@ class Runtime:
 
     def spawn(self, handler, budget: int = 100) -> int:
         """
-        Spawn a new push-based actor.
+        Spawn a new push-based actor (Green Thread).
         
         The handler must be a callable that accepts a single argument (the message).
         The actor will be called repeatedly for each incoming message.
@@ -22,10 +22,12 @@ class Runtime:
 
     def spawn_with_mailbox(self, handler, budget: int = 100) -> int:
         """
-        Spawn a new pull-based actor.
+        Spawn a new pull-based actor in a dedicated OS thread.
         
         The handler must be a callable that accepts a single argument: the `mailbox` object.
-        The handler is responsible for running its own loop and calling `await mailbox.recv()`.
+        The handler is responsible for running its own loop and calling `mailbox.recv()` (blocking).
+        
+        Note: This consumes a generic thread pool worker. Bounded by system resources.
         
         Args:
             handler: A callable taking (mailbox: PyMailbox).
@@ -51,9 +53,17 @@ class Runtime:
         """Assign a human-readable name to a PID."""
         self._inner.register(name, pid)
 
+    def unregister(self, name: str):
+        """Unregister a named PID."""
+        self._inner.unregister(name)
+
     def resolve(self, name: str) -> Optional[int]:
         """Look up the PID associated with a name locally."""
         return self._inner.resolve(name)
+
+    def whereis(self, name: str) -> Optional[int]:
+        """Alias for resolve (Erlang style)."""
+        return self._inner.whereis(name)
 
     def resolve_remote(self, addr: str, name: str) -> Optional[int]:
         """Query a remote node for a PID by name (Blocking)."""
@@ -78,8 +88,11 @@ class Runtime:
     def selective_recv(self, pid: int, matcher: Callable, timeout: Optional[float] = None) -> Awaitable[Optional[Union[bytes, PySystemMessage]]]:
         """
         Return an awaitable that resolves when `matcher(msg)` is True.
-        This is for 'observed' actors only (spawned via `spawn_observed_handler` from Rust side
-        or specialized internal helpers, not standard `spawn`).
+        
+        NOTE: This is for 'observed' actors (debug/monitoring) spawned via 
+        `spawn_observed_handler`, NOT for standard mailbox actors.
+        
+        Standard mailbox actors should use `mailbox.selective_recv()` directly.
 
         Args:
             pid: The PID of the observed actor.

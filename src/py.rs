@@ -146,6 +146,7 @@ fn run_python_matcher(py: Python, matcher: &PyObject, msg: &crate::mailbox::Mess
 }
 
 /// A wrapper around a live MailboxReceiver for Python actors.
+/// Revamped: Now purely blocking/synchronous to Python, running in dedicated threads.
 #[pyclass]
 #[derive(Clone)]
 pub struct PyMailbox {
@@ -154,35 +155,50 @@ pub struct PyMailbox {
 
 #[pymethods]
 impl PyMailbox {
-    /// Receive the next message (awaitable).
-    fn recv<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<&'py PyAny> {
+    /// Receive the next message (Blocking).
+    /// Releases the GIL while waiting.
+    fn recv(&self, py: Python, timeout: Option<f64>) -> PyResult<PyObject> {
         let rx = self.inner.clone();
-        future_into_py(py, async move {
+        
+        // Release GIL to allow other threads to run while we block on the channel
+        py.allow_threads(move || {
+            let rt = tokio::runtime::Handle::current();
+            
+            // We are likely in a dedicated blocking thread, so we block_on the async work.
             let fut = async {
                 let mut guard = rx.lock().await;
                 guard.recv().await
             };
 
             let res = if let Some(sec) = timeout {
-                match tokio::time::timeout(Duration::from_secs_f64(sec), fut).await {
-                    Ok(val) => val,
-                    Err(_) => return Ok(Python::with_gil(|py| py.None())), // Timeout
-                }
+                rt.block_on(async {
+                    match tokio::time::timeout(Duration::from_secs_f64(sec), fut).await {
+                        Ok(val) => val,
+                        Err(_) => None, // Timeout
+                    }
+                })
             } else {
-                fut.await
+                rt.block_on(fut)
             };
 
-            match res {
-                Some(msg) => Ok(Python::with_gil(|py| message_to_py(py, msg))),
-                None => Ok(Python::with_gil(|py| py.None())),
-            }
+            // Re-acquire GIL to return result
+            Python::with_gil(|py| {
+                match res {
+                    Some(msg) => Ok(message_to_py(py, msg)),
+                    None => Ok(py.None()),
+                }
+            })
         })
     }
 
-    /// Selectively receive a message matching a Python predicate (awaitable).
-    fn selective_recv<'py>(&self, py: Python<'py>, matcher: PyObject, timeout: Option<f64>) -> PyResult<&'py PyAny> {
+    /// Selectively receive a message matching a Python predicate (Blocking).
+    /// Releases the GIL while waiting.
+    fn selective_recv(&self, py: Python, matcher: PyObject, timeout: Option<f64>) -> PyResult<PyObject> {
         let rx = self.inner.clone();
-        future_into_py(py, async move {
+
+        py.allow_threads(move || {
+            let rt = tokio::runtime::Handle::current();
+            
             let fut = async {
                 let mut guard = rx.lock().await;
                 guard.selective_recv(|msg| {
@@ -191,18 +207,22 @@ impl PyMailbox {
             };
 
             let res = if let Some(sec) = timeout {
-                match tokio::time::timeout(Duration::from_secs_f64(sec), fut).await {
-                    Ok(val) => val,
-                    Err(_) => return Ok(Python::with_gil(|py| py.None())), // Timeout
-                }
+                rt.block_on(async {
+                    match tokio::time::timeout(Duration::from_secs_f64(sec), fut).await {
+                        Ok(val) => val,
+                        Err(_) => None, // Timeout
+                    }
+                })
             } else {
-                fut.await
+                rt.block_on(fut)
             };
 
-            match res {
-                Some(msg) => Ok(Python::with_gil(|py| message_to_py(py, msg))),
-                None => Ok(Python::with_gil(|py| py.None())),
-            }
+            Python::with_gil(|py| {
+                match res {
+                    Some(msg) => Ok(message_to_py(py, msg)),
+                    None => Ok(py.None()),
+                }
+            })
         })
     }
 }
@@ -220,16 +240,34 @@ impl PyRuntime {
         Self { inner: std::sync::Arc::new(crate::Runtime::new()) }
     }
 
-    /// Phase 6: Register a human-readable name for a PID.
+    // --- Phase 6: Name Registry ---
+
+    /// Register a human-readable name for a PID.
+    /// If the name is already taken, it is overwritten.
     fn register(&self, name: String, pid: u64) -> PyResult<()> {
         self.inner.register(name, pid);
         Ok(())
     }
 
-    /// Phase 6: Resolve a name to its PID locally.
+    /// Unregister a named PID.
+    /// Does nothing if the name is not registered.
+    fn unregister(&self, name: String) -> PyResult<()> {
+        self.inner.unregister(&name);
+        Ok(())
+    }
+
+    /// Resolve a name to its PID locally.
+    /// Returns None if the name is not found.
     fn resolve(&self, name: String) -> PyResult<Option<u64>> {
         Ok(self.inner.resolve(&name))
     }
+
+    /// Alias for resolve (Erlang style).
+    fn whereis(&self, name: String) -> PyResult<Option<u64>> {
+        Ok(self.inner.resolve(&name))
+    }
+
+    // --- End Registry ---
 
     /// Phase 7: Resolve a name on a remote node (Synchronous/Blocking).
     /// Detects if an active runtime exists. If so, uses block_in_place to avoid panics.
@@ -370,67 +408,34 @@ impl PyRuntime {
     }
 
     /// Spawns a pull-based actor.
-    /// The `py_callable` is called ONCE with a `PyMailbox` object.
-    /// FIX: Creates a new asyncio loop and runs the coroutine to completion.
+    /// The `py_callable` is called ONCE with a `PyMailbox` object in a dedicated OS thread.
+    /// This mimics Erlang/Go style blocking actors without needing Python asyncio.
     fn spawn_with_mailbox(&self, py_callable: PyObject, budget: usize) -> PyResult<u64> {
         let pid = self.inner.spawn_actor_with_budget(move |rx| async move {
             let mailbox = PyMailbox {
                 inner: Arc::new(TokioMutex::new(rx))
             };
             
-            if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
-                return;
-            }
-
-            Python::with_gil(|py| {
-                // 1. Setup asyncio loop for this background thread
-                // We must import asyncio locally inside this thread's context
-                let asyncio = match py.import("asyncio") {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!("[Myrmidon] Failed to import asyncio: {}", e);
-                        e.print(py);
-                        return;
-                    }
-                };
-
-                // Create a new loop for this specific actor thread
-                let loop_obj = match asyncio.call_method0("new_event_loop") {
-                    Ok(l) => l,
-                    Err(e) => {
-                        eprintln!("[Myrmidon] Failed to create event loop: {}", e);
-                        e.print(py);
-                        return;
-                    }
-                };
-
-                // Set it as the current loop for this thread
-                if let Err(e) = asyncio.call_method1("set_event_loop", (loop_obj,)) {
-                    eprintln!("[Myrmidon] Failed to set event loop: {}", e);
-                    e.print(py);
+            // We are currently in a Tokio worker thread (async).
+            // We need to spawn a dedicated OS thread (blocking) for the Python synchronous loop
+            // to avoid blocking the Tokio runtime.
+            let handle = tokio::task::spawn_blocking(move || {
+                if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
                     return;
                 }
-
-                // 2. Call the actor function to get the coroutine
-                match py_callable.call1(py, (mailbox,)) {
-                    Ok(coro) => {
-                        // 3. Drive the coroutine using the new loop
-                        // This blocks the Rust task, effectively handing control to the Python loop
-                        let res = loop_obj.call_method1("run_until_complete", (coro,));
-                        if let Err(e) = res {
-                            eprintln!("[Myrmidon] Python mailbox actor crashed: {}", e);
-                            e.print(py);
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("[Myrmidon] Python mailbox actor startup exception: {}", e);
+                
+                Python::with_gil(|py| {
+                    // Just call the function. It is expected to block on mailbox.recv()
+                    if let Err(e) = py_callable.call1(py, (mailbox,)) {
+                        eprintln!("[Myrmidon] Python mailbox actor exception: {}", e);
                         e.print(py);
                     }
-                }
-                
-                // 4. Cleanup: Close the loop when the actor exits
-                let _ = loop_obj.call_method0("close");
+                });
             });
+
+            // Await the thread's completion. This keeps the actor "alive" in the system
+            // until the Python function returns.
+            let _ = handle.await;
         }, budget);
 
         Ok(pid)

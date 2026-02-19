@@ -15,33 +15,30 @@ async fn test_mailbox_actor_basic_recv() {
         locals.set_item("__builtins__", py.import("builtins").unwrap()).unwrap();
 
         py.run(r#"
-import asyncio
+import time
 
-# A pull-based actor that reads from its mailbox
-async def mailbox_actor(mailbox):
-    # 1. Standard receive (awaiting message)
-    msg1 = await mailbox.recv()
-    # 2. Receive with timeout (should be fast here)
-    msg2 = await mailbox.recv(timeout=1.0)
+# A pull-based actor that reads from its mailbox.
+# NOTE: No longer 'async def'. This runs in a dedicated thread.
+def mailbox_actor(mailbox):
+    # 1. Standard receive (blocking, releases GIL internally)
+    msg1 = mailbox.recv()
+    # 2. Receive with timeout
+    msg2 = mailbox.recv(timeout=1.0)
     
     # Send results back to a global list for verification
     global results
     results = [msg1, msg2]
 
 # Spawn the actor with a budget of 100
+# This now spawns a real OS thread for the actor.
 pid = rt.spawn_with_mailbox(mailbox_actor, 100)
 
 # Send two messages
 rt.send(pid, b"first")
 rt.send(pid, b"second")
 
-# Allow time for async execution
-async def wait():
-    await asyncio.sleep(0.5)
-
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-loop.run_until_complete(wait())
+# We just sleep the main thread to allow the background actor thread to finish.
+time.sleep(0.5)
 "#, Some(locals), Some(locals)).unwrap();
 
         let results: Vec<Vec<u8>> = locals.get_item("results").expect("results global not set (actor failed?)").extract().unwrap();
@@ -60,23 +57,23 @@ async fn test_mailbox_actor_selective_recv() {
         locals.set_item("__builtins__", py.import("builtins").unwrap()).unwrap();
 
         py.run(r#"
-import asyncio
+import time
 
-async def mailbox_actor(mailbox):
+def mailbox_actor(mailbox):
     # We expect messages: "A", "target", "B"
     # We want to pick "target" out of order.
     
     def matcher(msg):
         return msg == b"target"
 
-    # This should skip "A" and grab "target"
-    target = await mailbox.selective_recv(matcher, timeout=1.0)
+    # This should skip "A" and grab "target" (blocking)
+    target = mailbox.selective_recv(matcher, timeout=1.0)
     
     # Next standard recv should get "A" (was deferred)
-    after_1 = await mailbox.recv()
+    after_1 = mailbox.recv()
     
     # Next standard recv should get "B"
-    after_2 = await mailbox.recv()
+    after_2 = mailbox.recv()
     
     global results
     results = [target, after_1, after_2]
@@ -89,12 +86,8 @@ rt.send(pid, b"A")
 rt.send(pid, b"target")
 rt.send(pid, b"B")
 
-async def wait():
-    await asyncio.sleep(0.5)
-
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-loop.run_until_complete(wait())
+# Allow time for threaded execution
+time.sleep(0.5)
 "#, Some(locals), Some(locals)).unwrap();
 
         let results: Vec<Vec<u8>> = locals.get_item("results").expect("results global not set").extract().unwrap();
@@ -114,11 +107,12 @@ async fn test_mailbox_actor_timeout() {
         locals.set_item("__builtins__", py.import("builtins").unwrap()).unwrap();
 
         py.run(r#"
-import asyncio
+import time
 
-async def mailbox_actor(mailbox):
+def mailbox_actor(mailbox):
     # Try to receive with a short timeout, expecting None
-    msg = await mailbox.recv(timeout=0.05)
+    # No await needed
+    msg = mailbox.recv(timeout=0.05)
     
     global result
     result = msg
@@ -127,12 +121,8 @@ async def mailbox_actor(mailbox):
 pid = rt.spawn_with_mailbox(mailbox_actor, 100)
 # We send NO messages
 
-async def wait():
-    await asyncio.sleep(0.5)
-
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-loop.run_until_complete(wait())
+# Allow time for execution
+time.sleep(0.5)
 "#, Some(locals), Some(locals)).unwrap();
 
         let result = locals.get_item("result").expect("result global not set");
