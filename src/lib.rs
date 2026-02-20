@@ -10,7 +10,6 @@ pub mod mailbox;
 pub mod network;
 pub mod pid;
 pub mod registry;
-pub mod scheduler;
 pub mod supervisor;
 
 #[cfg(feature = "pyo3")]
@@ -460,7 +459,7 @@ impl Runtime {
         pid
     }
 
-    pub fn spawn_actor_with_budget<H, Fut>(&self, handler: H, budget: usize) -> Pid
+    pub fn spawn_actor_with_budget<H, Fut>(&self, handler: H, _budget: usize) -> Pid
     where
     H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -475,10 +474,9 @@ impl Runtime {
         let slab2 = self.slab.clone();
         let path_supervisors2 = self.path_supervisors.clone();
         let fut = handler(rx);
-        let limited = crate::scheduler::ReductionLimiter::new(fut, budget);
 
         RUNTIME.spawn(async move {
-            let actor_handle = tokio::spawn(limited);
+            let actor_handle = tokio::spawn(fut);
             let res = actor_handle.await;
 
             let (reason, meta) = match res {
@@ -533,11 +531,16 @@ impl Runtime {
         RUNTIME.spawn(async move {
             let h_loop = handler.clone();
             let actor_handle = tokio::spawn(async move {
+                let mut processed = 0;
                 while let Some(msg) = rx.recv().await {
                     let h = h_loop.clone();
-                    let fut = (h)(msg);
-                    let limited = crate::scheduler::ReductionLimiter::new(fut, budget);
-                    limited.await;
+                    (h)(msg).await;
+                    
+                    processed += 1;
+                    if processed >= budget {
+                        processed = 0;
+                        tokio::task::yield_now().await;
+                    }
                 }
             });
 
