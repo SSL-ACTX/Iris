@@ -1050,6 +1050,57 @@ impl PyRuntime {
         self.inner.supervise(pid, factory_closure, strat);
         Ok(())
     }
+
+    /// Attach a Python factory to a path-scoped supervisor.
+    fn path_supervise_with_factory(
+        &self,
+        path: String,
+        pid: u64,
+        py_factory: PyObject,
+        strategy: &str,
+    ) -> PyResult<()> {
+        use std::sync::Arc;
+
+        let strat = match strategy.to_lowercase().as_str() {
+            "restartone" | "restart_one" | "one" => {
+                crate::supervisor::RestartStrategy::RestartOne
+            }
+            "restartall" | "restart_all" | "all" => {
+                crate::supervisor::RestartStrategy::RestartAll
+            }
+            _ => return Err(pyo3::exceptions::PyValueError::new_err("invalid strategy")),
+        };
+
+        // Validate we can call the factory once to obtain an initial pid
+        let _initial_pid = Python::with_gil(|py| {
+            let obj = py_factory.as_ref(py);
+            let called = obj.call0()?;
+            let pid: u64 = called.extract()?;
+            Ok::<u64, pyo3::PyErr>(pid)
+        })?;
+
+        let factory_py = py_factory.clone();
+        let factory_closure: Arc<dyn Fn() -> Result<crate::pid::Pid, String> + Send + Sync> =
+            Arc::new(move || {
+                if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                    return Err("Interpreter shutting down".to_string());
+                }
+                Python::with_gil(|py| {
+                    let obj = factory_py.as_ref(py);
+                    match obj.call0() {
+                        Ok(v) => match v.extract::<u64>() {
+                            Ok(pid) => Ok(pid),
+                            Err(e) => Err(e.to_string()),
+                        },
+                        Err(e) => Err(e.to_string()),
+                    }
+                })
+            });
+
+        self.inner
+            .path_supervise_with_factory(&path, pid, factory_closure, strat);
+        Ok(())
+    }
 }
 
 #[cfg(feature = "pyo3")]

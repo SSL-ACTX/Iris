@@ -130,6 +130,17 @@ class Runtime:
         """
         return self._inner.spawn_with_path_observed(budget, path)
 
+    def path_supervise_with_factory(self, path: str, pid: int, factory, strategy: str):
+        """Attach a Python factory to the path-scoped supervisor for restart semantics.
+
+        Args:
+            path: The path prefix for the supervisor.
+            pid: The current PID to supervise.
+            factory: A callable returning a new PID when called.
+            strategy: Restart strategy string: 'restartone' or 'restartall'.
+        """
+        self._inner.path_supervise_with_factory(path, pid, factory, strategy)
+
     def resolve_remote(self, addr: str, name: str) -> Optional[int]:
         """Query a remote node for a PID by name (Blocking)."""
         return self._inner.resolve_remote(addr, name)

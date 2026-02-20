@@ -30,9 +30,9 @@ use tokio::runtime::Runtime as TokioRuntime;
 /// A global, multi-threaded Tokio runtime shared by all Myrmidon instances.
 static RUNTIME: Lazy<TokioRuntime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to create Myrmidon Tokio Runtime")
+    .enable_all()
+    .build()
+    .expect("Failed to create Myrmidon Tokio Runtime")
 });
 
 /// Lightweight runtime for spawning actors and managing distributed nodes.
@@ -160,7 +160,7 @@ impl Runtime {
     pub fn get_release_gil_limits(&self) -> (usize, usize) {
         (
             *self.release_gil_max_threads.lock().unwrap(),
-            *self.gil_pool_size.lock().unwrap(),
+         *self.gil_pool_size.lock().unwrap(),
         )
     }
 
@@ -205,8 +205,8 @@ impl Runtime {
     /// Create a path-scoped supervisor for `path`.
     pub fn create_path_supervisor(&self, path: &str) {
         self.path_supervisors
-            .entry(path.to_string())
-            .or_insert_with(|| Arc::new(supervisor::Supervisor::new()));
+        .entry(path.to_string())
+        .or_insert_with(|| Arc::new(supervisor::Supervisor::new()));
     }
 
     /// Remove a path-scoped supervisor if present.
@@ -342,8 +342,8 @@ impl Runtime {
 
     pub fn spawn_actor<H, Fut>(&self, handler: H) -> Pid
     where
-        H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
+    H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
@@ -353,6 +353,7 @@ impl Runtime {
         let mailboxes2 = self.mailboxes.clone();
         let supervisor2 = self.supervisor.clone();
         let slab2 = self.slab.clone();
+        let path_supervisors2 = self.path_supervisors.clone();
 
         RUNTIME.spawn(async move {
             let actor_handle = tokio::spawn(handler(rx));
@@ -361,17 +362,24 @@ impl Runtime {
             // Determine exit reason and metadata
             let (reason, meta) = match res {
                 Ok(_) => (crate::mailbox::ExitReason::Normal, None),
-                Err(e) => {
-                    if e.is_panic() {
-                        (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
-                    } else {
-                        (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
-                    }
-                }
+                      Err(e) => {
+                          if e.is_panic() {
+                              (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
+                          } else {
+                              (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
+                          }
+                      }
             };
 
             mailboxes2.remove(&pid);
             supervisor2.notify_exit(pid);
+            // Notify any path-scoped supervisors that supervise this pid
+            for entry in path_supervisors2.iter() {
+                let sup = entry.value();
+                if sup.contains_child(pid) {
+                    sup.notify_exit(pid);
+                }
+            }
             slab2.lock().unwrap().deallocate(pid);
 
             let linked = supervisor2.linked_pids(pid);
@@ -388,8 +396,8 @@ impl Runtime {
 
     pub fn spawn_actor_with_budget<H, Fut>(&self, handler: H, budget: usize) -> Pid
     where
-        H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
+    H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
@@ -399,6 +407,7 @@ impl Runtime {
         let mailboxes2 = self.mailboxes.clone();
         let supervisor2 = self.supervisor.clone();
         let slab2 = self.slab.clone();
+        let path_supervisors2 = self.path_supervisors.clone();
         let fut = handler(rx);
         let limited = crate::scheduler::ReductionLimiter::new(fut, budget);
 
@@ -408,17 +417,23 @@ impl Runtime {
 
             let (reason, meta) = match res {
                 Ok(_) => (crate::mailbox::ExitReason::Normal, None),
-                Err(e) => {
-                    if e.is_panic() {
-                        (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
-                    } else {
-                        (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
-                    }
-                }
+                      Err(e) => {
+                          if e.is_panic() {
+                              (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
+                          } else {
+                              (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
+                          }
+                      }
             };
 
             mailboxes2.remove(&pid);
             supervisor2.notify_exit(pid);
+            for entry in path_supervisors2.iter() {
+                let sup = entry.value();
+                if sup.contains_child(pid) {
+                    sup.notify_exit(pid);
+                }
+            }
             slab2.lock().unwrap().deallocate(pid);
 
             let linked = supervisor2.linked_pids(pid);
@@ -435,8 +450,8 @@ impl Runtime {
 
     pub fn spawn_handler_with_budget<H, Fut>(&self, handler: H, budget: usize) -> Pid
     where
-        H: Fn(mailbox::Message) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
+    H: Fn(mailbox::Message) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
@@ -447,6 +462,7 @@ impl Runtime {
         let supervisor2 = self.supervisor.clone();
         let mailboxes2 = self.mailboxes.clone();
         let slab2 = self.slab.clone();
+        let path_supervisors2 = self.path_supervisors.clone();
 
         RUNTIME.spawn(async move {
             let h_loop = handler.clone();
@@ -463,17 +479,23 @@ impl Runtime {
 
             let (reason, meta) = match res {
                 Ok(_) => (crate::mailbox::ExitReason::Normal, None),
-                Err(e) => {
-                    if e.is_panic() {
-                        (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
-                    } else {
-                        (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
-                    }
-                }
+                      Err(e) => {
+                          if e.is_panic() {
+                              (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
+                          } else {
+                              (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
+                          }
+                      }
             };
 
             mailboxes2.remove(&pid);
             supervisor2.notify_exit(pid);
+            for entry in path_supervisors2.iter() {
+                let sup = entry.value();
+                if sup.contains_child(pid) {
+                    sup.notify_exit(pid);
+                }
+            }
             slab2.lock().unwrap().deallocate(pid);
 
             let linked = supervisor2.linked_pids(pid);
@@ -499,6 +521,7 @@ impl Runtime {
         let supervisor2 = self.supervisor.clone();
         let mailboxes2 = self.mailboxes.clone();
         let slab2 = self.slab.clone();
+        let path_supervisors2 = self.path_supervisors.clone();
 
         RUNTIME.spawn(async move {
             let v_clone = vec.clone();
@@ -516,17 +539,23 @@ impl Runtime {
 
             let (reason, meta) = match res {
                 Ok(_) => (crate::mailbox::ExitReason::Normal, None),
-                Err(e) => {
-                    if e.is_panic() {
-                        (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
-                    } else {
-                        (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
-                    }
-                }
+                      Err(e) => {
+                          if e.is_panic() {
+                              (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
+                          } else {
+                              (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
+                          }
+                      }
             };
 
             mailboxes2.remove(&pid);
             supervisor2.notify_exit(pid);
+            for entry in path_supervisors2.iter() {
+                let sup = entry.value();
+                if sup.contains_child(pid) {
+                    sup.notify_exit(pid);
+                }
+            }
             slab2.lock().unwrap().deallocate(pid);
 
             let linked = supervisor2.linked_pids(pid);
@@ -543,8 +572,8 @@ impl Runtime {
 
     pub fn get_observed_messages(&self, pid: Pid) -> Option<Vec<mailbox::Message>> {
         self.observers
-            .get(&pid)
-            .map(|entry| entry.value().lock().unwrap().clone())
+        .get(&pid)
+        .map(|entry| entry.value().lock().unwrap().clone())
     }
 
     /// Remove and return a single observed message matching the predicate.
@@ -555,7 +584,7 @@ impl Runtime {
         mut matcher: F,
     ) -> Option<mailbox::Message>
     where
-        F: FnMut(&mailbox::Message) -> bool,
+    F: FnMut(&mailbox::Message) -> bool,
     {
         if let Some(entry) = self.observers.get(&pid) {
             let mut guard = entry.value().lock().unwrap();
@@ -592,10 +621,26 @@ impl Runtime {
         &self,
         pid: Pid,
         factory: Arc<dyn Fn() -> Result<Pid, String> + Send + Sync>,
-        strategy: supervisor::RestartStrategy,
+                     strategy: supervisor::RestartStrategy,
     ) {
         let spec = supervisor::ChildSpec { factory, strategy };
         self.supervisor.add_child(pid, spec);
+    }
+
+    /// Attach a factory-based child spec to a path-scoped supervisor.
+    pub fn path_supervise_with_factory(
+        &self,
+        path: &str,
+        pid: Pid,
+        factory: Arc<dyn Fn() -> Result<Pid, String> + Send + Sync>,
+                                       strategy: supervisor::RestartStrategy,
+    ) {
+        let spec = supervisor::ChildSpec { factory, strategy };
+        let entry = self
+        .path_supervisors
+        .entry(path.to_string())
+        .or_insert_with(|| Arc::new(supervisor::Supervisor::new()));
+        entry.add_child(pid, spec);
     }
 
     pub fn link(&self, a: Pid, b: Pid) {

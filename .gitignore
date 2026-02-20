@@ -6,3 +6,4 @@ Cargo.lock
 __pycache__/
 *.so
 *.node
+node_modules/
