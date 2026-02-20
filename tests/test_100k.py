@@ -22,7 +22,7 @@ try:
     print("🚀 Spawning...", flush=True)
     for i in range(COUNT):
         # Spawn actor with a small budget since they are tiny
-        pid = rt.spawn(no_op_handler, budget=10)
+        pid = rt.spawn(no_op_handler, budget=10, release_gil=False)
         pids.append(pid)
 
         if (i + 1) % BATCH_SIZE == 0:

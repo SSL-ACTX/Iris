@@ -6,7 +6,7 @@ import sys
 # NOTE: Mailbox actors use dedicated OS threads (via Tokio's blocking pool).
 # The default Tokio limit is usually 512 blocking threads.
 # Setting this to 100,000 WILL deadlock standard runtimes.
-COUNT = 55_000  
+COUNT = 100_000  
 BATCH_SIZE = 5000
 
 print(f"--- Myrmidon Mailbox Stress Test: {myrmidon.version()} ---")
