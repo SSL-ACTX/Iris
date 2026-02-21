@@ -1,8 +1,8 @@
 <div align="center">
 
-![Iris Banner](https://capsule-render.vercel.app/api?type=waving&color=0:000000,100:2E3440&height=220&section=header&text=Iris&fontSize=90&fontColor=FFFFFF&animation=fadeIn&fontAlignY=35&rotate=-2&stroke=4C566A&strokeWidth=2&desc=Distributed%20Polyglot%20Actor%20Runtime&descSize=20&descAlignY=60)
+![Iris Banner](https://svg-banners.vercel.app/api?type=luminance&text1=Iris%20🌸&width=800&height=400&color=FFB6C1)
 
-![Version](https://img.shields.io/badge/version-0.1.3-blue.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-0.3.0-blue.svg?style=for-the-badge)
 ![Language](https://img.shields.io/badge/language-Rust%20%7C%20Python%20%7C%20Node.js-orange.svg?style=for-the-badge&logo=rust)
 ![License](https://img.shields.io/badge/license-AGPL_3.0-green.svg?style=for-the-badge)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android-lightgrey.svg?style=for-the-badge&logo=linux)
@@ -537,6 +537,6 @@ Supported. Ensure you have the latest Microsoft C++ Build Tools installed for Py
 
 **Author:** Seuriin ([SSL-ACTX](https://github.com/SSL-ACTX))
 
-*v0.1.3*
+*v0.3.0*
 
 </div>
