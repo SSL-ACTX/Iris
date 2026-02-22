@@ -469,6 +469,122 @@ impl Runtime {
         pid
     }
 
+    /// Bounded mailbox variant of spawn_actor.
+    pub fn spawn_actor_bounded<H, Fut>(&self, handler: H, capacity: usize) -> Pid
+    where
+        H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut slab = self.slab.lock().unwrap();
+        let pid = slab.allocate();
+        let (tx, rx) = mailbox::bounded_channel(capacity);
+        self.mailboxes.insert(pid, tx.clone());
+
+        let mailboxes2 = self.mailboxes.clone();
+        let supervisor2 = self.supervisor.clone();
+        let slab2 = self.slab.clone();
+        let path_supervisors2 = self.path_supervisors.clone();
+        let rt_exit_clone = self.clone();
+
+        RUNTIME.spawn(async move {
+            let actor_handle = tokio::spawn(handler(rx));
+            let res = actor_handle.await;
+
+            // Determine exit reason and metadata
+            let (reason, meta) = match res {
+                Ok(_) => (crate::mailbox::ExitReason::Normal, None),
+                Err(e) => {
+                    if e.is_panic() {
+                        (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
+                    } else {
+                        (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
+                    }
+                }
+            };
+
+            mailboxes2.remove(&pid);
+            supervisor2.notify_exit(pid);
+            // Notify any path-scoped supervisors that supervise this pid
+            for entry in path_supervisors2.iter() {
+                let sup = entry.value();
+                if sup.contains_child(pid) {
+                    sup.notify_exit(pid);
+                }
+            }
+            slab2.lock().unwrap().deallocate(pid);
+
+            // structured concurrency cleanup
+            rt_exit_clone.handle_exit_internal(pid);
+
+            let linked = supervisor2.linked_pids(pid);
+            for lp in linked {
+                if let Some(sender) = mailboxes2.get(&lp) {
+                    let info = crate::mailbox::ExitInfo { from: pid, reason: reason.clone(), metadata: meta.clone() };
+                    let _ = sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
+                }
+            }
+        });
+
+        pid
+    }
+
+    /// Bounded variant of spawn_actor_with_budget.
+    pub fn spawn_actor_with_budget_bounded<H, Fut>(&self, handler: H, budget: usize, capacity: usize) -> Pid
+    where
+        H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut slab = self.slab.lock().unwrap();
+        let pid = slab.allocate();
+        let (tx, rx) = mailbox::bounded_channel(capacity);
+        self.mailboxes.insert(pid, tx.clone());
+
+        let mailboxes2 = self.mailboxes.clone();
+        let supervisor2 = self.supervisor.clone();
+        let slab2 = self.slab.clone();
+        let path_supervisors2 = self.path_supervisors.clone();
+        let rt_exit_clone = self.clone();
+        let fut = handler(rx);
+
+        RUNTIME.spawn(async move {
+            let actor_handle = tokio::spawn(fut);
+            let res = actor_handle.await;
+
+            let (reason, meta) = match res {
+                Ok(_) => (crate::mailbox::ExitReason::Normal, None),
+                Err(e) => {
+                    if e.is_panic() {
+                        (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
+                    } else {
+                        (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
+                    }
+                }
+            };
+
+            mailboxes2.remove(&pid);
+            supervisor2.notify_exit(pid);
+            for entry in path_supervisors2.iter() {
+                let sup = entry.value();
+                if sup.contains_child(pid) {
+                    sup.notify_exit(pid);
+                }
+            }
+            slab2.lock().unwrap().deallocate(pid);
+
+            rt_exit_clone.handle_exit_internal(pid);
+
+            let linked = supervisor2.linked_pids(pid);
+            for lp in linked {
+                if let Some(sender) = mailboxes2.get(&lp) {
+                    let info = crate::mailbox::ExitInfo { from: pid, reason: reason.clone(), metadata: meta.clone() };
+                    let _ = sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
+                }
+            }
+        });
+
+        pid
+    }
+
     pub fn spawn_actor_with_budget<H, Fut>(&self, handler: H, _budget: usize) -> Pid
     where
     H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
@@ -822,5 +938,47 @@ impl Runtime {
 
     pub fn unlink(&self, a: Pid, b: Pid) {
         self.supervisor.unlink(a, b);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{sleep, Duration};
+
+    #[tokio::test]
+    async fn bounded_spawn_rejects_overflow() {
+        let rt = Runtime::new();
+        // handler that pulls from the mailbox and forwards to a channel for inspection
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // handler will wait on a one-shot signal before reading from the
+        // mailbox.  This guarantees the queue holds the first message when the
+        // test attempts the second send.
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+        let handler = move |mut mailbox: mailbox::MailboxReceiver| {
+            let tx = tx.clone();
+            let mut start_rx = start_rx;
+            async move {
+                // wait until test gives permission to proceed
+                let _ = start_rx.await;
+                if let Some(msg) = mailbox.recv().await {
+                    let _ = tx.send(msg);
+                }
+            }
+        };
+
+        let pid = rt.spawn_actor_bounded(handler, 1);
+        // first send success
+        assert!(rt.send(pid, mailbox::Message::User(b"x".to_vec().into())).is_ok());
+        // second send should be dropped (error returned)
+        assert!(rt.send(pid, mailbox::Message::User(b"y".to_vec().into())).is_err());
+
+        // now tell the actor it may proceed and consume the queued message
+        let _ = start_tx.send(());
+
+        // allow the actor to run and verify it received the first message
+        sleep(Duration::from_millis(50)).await;
+        let got = rx.try_recv().unwrap();
+        assert_eq!(got, mailbox::Message::User(b"x".to_vec().into()));
     }
 }

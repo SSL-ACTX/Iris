@@ -232,6 +232,52 @@ impl NodeRuntime {
         Ok(pid as i64)
     }
 
+    /// Spawn a handler backed by a bounded mailbox capacity. The JS callback
+    /// receives messages just like `spawn` and will be invoked each time a
+    /// user payload arrives. If the queue is full, additional sends will fail.
+    #[napi]
+    pub fn spawn_bounded(&self, handler: JsFunction, capacity: u32, budget: Option<u32>) -> Result<i64> {
+        let budget = budget.unwrap_or(100) as usize;
+        let cap = capacity as usize;
+
+        // create TSFN binder like in `spawn`
+        let tsfn: ThreadsafeFunction<Message, ErrorStrategy::Fatal> = handler
+            .create_threadsafe_function(0, |ctx| {
+                let msg = ctx.value;
+                let js_val = message_to_js(&ctx.env, msg)?;
+                Ok(vec![js_val])
+            })?;
+
+        let behavior = Arc::new(parking_lot::RwLock::new(tsfn));
+
+        let pid = self.inner.spawn_actor_with_budget_bounded(
+            move |mut rx| {
+                let behavior = behavior.clone();
+                async move {
+                    while let Some(msg) = rx.recv().await {
+                        // handle hot-swap at JS level
+                        if let Message::System(SystemMessage::HotSwap(ptr)) = msg {
+                            unsafe {
+                                let new_tsfn_box = Box::from_raw(
+                                    ptr as *mut ThreadsafeFunction<Message, ErrorStrategy::Fatal>,
+                                );
+                                let mut guard = behavior.write();
+                                *guard = *new_tsfn_box;
+                            }
+                            continue;
+                        }
+                        let guard = behavior.read();
+                        guard.call(msg, ThreadsafeFunctionCallMode::NonBlocking);
+                    }
+                }
+            },
+            budget,
+            cap,
+        );
+
+        Ok(pid as i64)
+    }
+
     #[napi]
     pub fn spawn_child(&self, parent: i64, handler: JsFunction, budget: Option<u32>) -> Result<i64> {
         let budget = budget.unwrap_or(100) as usize;

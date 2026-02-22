@@ -148,6 +148,62 @@ async fn py_runtime_spawn_and_send() {
     });
 }
 
+// simple bounded mailbox send drop-new test
+#[tokio::test]
+async fn py_bounded_mailbox_drop_new() {
+    // create runtime via Python helper like other tests
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        let rt_obj = runtime_type.call0().expect("construct PyRuntime");
+        rt_obj.into_py(py)
+    });
+
+    // build a Python list and callback to record messages
+    let msgs = Python::with_gil(|py| py.eval("[]", None, None).unwrap().to_object(py));
+    let cb = Python::with_gil(|py| {
+        let locals = pyo3::types::PyDict::new(py);
+        locals.set_item("msgs", msgs.clone_ref(py)).unwrap();
+        // evaluate lambda expression directly so we can capture it
+        let obj = py
+            .eval("lambda msg: msgs.append(bytes(msg))", None, Some(&locals))
+            .unwrap();
+        obj.to_object(py)
+    });
+
+    let pid: u64 = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("spawn_py_handler_bounded", (cb.clone_ref(py), 100usize, 1usize, false))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+
+    let ok1: bool = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("send", (pid, pyo3::types::PyBytes::new(py, b"a")))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+    assert!(ok1);
+
+    let ok2: bool = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("send", (pid, pyo3::types::PyBytes::new(py, b"b")))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+    assert!(!ok2);
+}
+
 // ---------- structured concurrency tests ----------
 
 #[tokio::test]

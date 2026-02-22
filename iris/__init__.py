@@ -27,6 +27,14 @@ class Runtime:
         """
         return self._inner.spawn_py_handler(handler, budget, release_gil)
 
+    def spawn_py_handler_bounded(self, handler, budget: int, capacity: int, release_gil: bool = False) -> int:
+        """
+        Spawn a Python handler with a bounded mailbox capacity.
+
+        Returns the PID. Sending beyond capacity will fail (drop-new policy).
+        """
+        return self._inner.spawn_py_handler_bounded(handler, budget, capacity, release_gil)
+
     def spawn_with_mailbox(self, handler, budget: int = 100) -> int:
         """
         Spawn a new pull-based actor in a dedicated OS thread.

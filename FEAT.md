@@ -25,7 +25,7 @@
 * [x] **Actor Hierarchies / Paths**
   Structured actor paths (`/system/http/router/worker-17`).
 
-* [ ] **Structured Concurrency**
+* [x] **Structured Concurrency**
   Child actors automatically terminate with their parent.
 
 * [ ] **Behavior Versioning**
@@ -35,8 +35,11 @@
 
 ## 🟢 Mailbox & Flow Control (Go / CSP-Inspired)
 
-* [ ] **Bounded Mailboxes**
-  Configurable capacity per actor.
+* [x] **Bounded Mailboxes**
+  Configurable capacity per actor with drop-new semantic (this phase 1 implementation).
+  - Rust API: `spawn_actor_bounded` / `spawn_actor_with_budget_bounded`
+  - Python: `Runtime.spawn_py_handler_bounded` (with tests)
+  - Node.js: `Runtime.spawn_bounded`
 
 * [ ] **Overflow Policies**
   Drop-new, drop-old, block, redirect, or spill to actor.

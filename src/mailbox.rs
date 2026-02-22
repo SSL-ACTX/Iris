@@ -6,6 +6,19 @@ use std::collections::VecDeque;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use tokio::sync::mpsc;
 
+/// Underlying sender type for user messages; either unbounded or bounded.
+#[derive(Clone)]
+enum UserSender {
+    Unbounded(mpsc::UnboundedSender<Bytes>),
+    Bounded(mpsc::Sender<Bytes>),
+}
+
+/// Underlying receiver type for user messages.
+enum UserReceiver {
+    Unbounded(mpsc::UnboundedReceiver<Bytes>),
+    Bounded(mpsc::Receiver<Bytes>),
+}
+
 /// Message is an envelope that can be either a user payload (binary blob)
 /// or a system message (e.g., exit notifications).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,7 +61,7 @@ pub enum Message {
 /// messages (e.g., Exit notifications) over user payloads.
 #[derive(Clone)]
 pub struct MailboxSender {
-    tx_user: mpsc::UnboundedSender<Bytes>,
+    tx_user: UserSender,
     tx_sys: mpsc::UnboundedSender<SystemMessage>,
     /// Count of user messages currently queued (including those in channel and stash).
     counter: Arc<AtomicUsize>,
@@ -56,21 +69,39 @@ pub struct MailboxSender {
 
 /// Receiver half of a mailbox.
 pub struct MailboxReceiver {
-    rx_user: mpsc::UnboundedReceiver<Bytes>,
+    rx_user: UserReceiver,
     rx_sys: mpsc::UnboundedReceiver<SystemMessage>,
     stash: VecDeque<Message>,
     counter: Arc<AtomicUsize>,
 }
 
 /// Create a new mailbox channel (sender, receiver).
+/// Create a new unbounded mailbox channel (sender, receiver).
 pub fn channel() -> (MailboxSender, MailboxReceiver) {
     let (tx_user, rx_user) = mpsc::unbounded_channel();
     let (tx_sys, rx_sys) = mpsc::unbounded_channel();
     let counter = Arc::new(AtomicUsize::new(0));
     (
-        MailboxSender { tx_user, tx_sys, counter: counter.clone() },
+        MailboxSender { tx_user: UserSender::Unbounded(tx_user), tx_sys, counter: counter.clone() },
         MailboxReceiver {
-            rx_user,
+            rx_user: UserReceiver::Unbounded(rx_user),
+            rx_sys,
+            stash: VecDeque::new(),
+            counter: counter.clone(),
+        },
+    )
+}
+
+/// Create a bounded mailbox channel with given capacity. If the queue is
+/// full, `send` will return Err(msg) (drop-new policy).
+pub fn bounded_channel(capacity: usize) -> (MailboxSender, MailboxReceiver) {
+    let (tx_user, rx_user) = mpsc::channel(capacity);
+    let (tx_sys, rx_sys) = mpsc::unbounded_channel();
+    let counter = Arc::new(AtomicUsize::new(0));
+    (
+        MailboxSender { tx_user: UserSender::Bounded(tx_user), tx_sys, counter: counter.clone() },
+        MailboxReceiver {
+            rx_user: UserReceiver::Bounded(rx_user),
             rx_sys,
             stash: VecDeque::new(),
             counter: counter.clone(),
@@ -80,20 +111,25 @@ pub fn channel() -> (MailboxSender, MailboxReceiver) {
 
 impl MailboxSender {
     /// Send a message into the mailbox.
+    /// For bounded user queues, policy is drop-new: error returned when full.
     pub fn send(&self, msg: Message) -> Result<(), Message> {
         match msg {
             Message::User(b) => {
-                // Increment counter first to represent the enqueued message.
+                // increment counter before enqueue attempt
                 self.counter.fetch_add(1, Ordering::SeqCst);
                 let backup = Message::User(b.clone());
-                match self.tx_user.send(b) {
-                    Ok(()) => Ok(()),
-                    Err(_) => {
-                        // Rollback counter on failure to send.
-                        self.counter.fetch_sub(1, Ordering::SeqCst);
-                        Err(backup)
-                    }
+                let res = match &self.tx_user {
+                    UserSender::Unbounded(tx) => tx.send(b).map_err(|_| backup.clone()),
+                    UserSender::Bounded(tx) => match tx.try_send(b) {
+                        Ok(()) => Ok(()),
+                        Err(_e) => Err(backup.clone()),
+                    },
+                };
+                if res.is_err() {
+                    // rollback counter
+                    self.counter.fetch_sub(1, Ordering::SeqCst);
                 }
+                res
             }
             Message::System(s) => {
                 let backup = Message::System(s.clone());
@@ -109,13 +145,20 @@ impl MailboxSender {
     pub fn send_user_bytes(&self, b: Bytes) -> Result<(), Bytes> {
         self.counter.fetch_add(1, Ordering::SeqCst);
         let backup = b.clone();
-        match self.tx_user.send(b) {
-            Ok(()) => Ok(()),
-            Err(_) => {
-                self.counter.fetch_sub(1, Ordering::SeqCst);
-                Err(backup)
-            }
+        let res = match &self.tx_user {
+            UserSender::Unbounded(tx) => tx.send(b).map_err(|_e| backup.clone()),
+            UserSender::Bounded(tx) => match tx.try_send(b) {
+                Ok(()) => Ok(()),
+                Err(err) => match err {
+                    mpsc::error::TrySendError::Full(_) => Err(backup.clone()),
+                    mpsc::error::TrySendError::Closed(_) => Err(backup.clone()),
+                },
+            },
+        };
+        if res.is_err() {
+            self.counter.fetch_sub(1, Ordering::SeqCst);
         }
+        res
     }
 
     /// Convenience: send system message directly.
@@ -152,7 +195,6 @@ impl MailboxReceiver {
 
         // If there are deferred user messages, deliver them before awaiting new ones.
         if let Some(front) = self.stash.pop_front() {
-            // If returning a user message from the stash, decrement the counter
             if matches!(front, Message::User(_)) {
                 self.counter.fetch_sub(1, Ordering::SeqCst);
             }
@@ -162,14 +204,25 @@ impl MailboxReceiver {
         tokio::select! {
             biased;
             sys = self.rx_sys.recv() => {
-                sys.map(Message::System)
+                match sys {
+                    Some(s) => Some(Message::System(s)),
+                    None => None,
+                }
             }
-            user = self.rx_user.recv() => {
-                user.map(|b| {
-                    // We're about to deliver a user message to the caller; decrement count.
+            user = {
+                async {
+                    match &mut self.rx_user {
+                        UserReceiver::Unbounded(rx) => rx.recv().await.map(Message::User),
+                        UserReceiver::Bounded(rx) => rx.recv().await.map(Message::User),
+                    }
+                }
+            } => {
+                if let Some(m) = user {
                     self.counter.fetch_sub(1, Ordering::SeqCst);
-                    Message::User(b)
-                })
+                    Some(m)
+                } else {
+                    None
+                }
             }
         }
     }
@@ -197,8 +250,11 @@ impl MailboxReceiver {
             return Some(front);
         }
 
-        self.rx_user.try_recv().ok().map(|b| {
-            // delivering directly from channel; decrement counter
+        let opt = match &mut self.rx_user {
+            UserReceiver::Unbounded(rx) => rx.try_recv().ok(),
+            UserReceiver::Bounded(rx) => rx.try_recv().ok(),
+        };
+        opt.map(|b| {
             self.counter.fetch_sub(1, Ordering::SeqCst);
             Message::User(b)
         })
@@ -248,16 +304,20 @@ impl MailboxReceiver {
                         None => return None,
                     }
                 }
-                user = self.rx_user.recv() => {
+                user = {
+                    async {
+                        match &mut self.rx_user {
+                            UserReceiver::Unbounded(rx) => rx.recv().await.map(Message::User),
+                            UserReceiver::Bounded(rx) => rx.recv().await.map(Message::User),
+                        }
+                    }
+                } => {
                     match user {
-                        Some(b) => {
-                            let m = Message::User(b);
+                        Some(m) => {
                             if matcher(&m) {
-                                // delivering to caller
                                 self.counter.fetch_sub(1, Ordering::SeqCst);
                                 return Some(m);
                             } else {
-                                // keep in stash; count stays the same
                                 self.stash.push_back(m);
                                 continue;
                             }
@@ -283,6 +343,31 @@ mod tests {
         match got {
             Message::User(buf) => assert_eq!(buf.as_ref(), b"hello"),
             _ => panic!("expected user message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_mailbox_drop_new() {
+        // This test will fail until bounded mailbox is implemented.
+        let (tx, mut rx) = bounded_channel(2);
+        tx.send(Message::User(Bytes::from_static(b"m1")))
+            .unwrap();
+        tx.send(Message::User(Bytes::from_static(b"m2")))
+            .unwrap();
+        // third send should be rejected because capacity is 2
+        assert!(tx
+            .send(Message::User(Bytes::from_static(b"m3")))
+            .is_err());
+
+        let first = rx.recv().await.expect("first");
+        let second = rx.recv().await.expect("second");
+        match first {
+            Message::User(b) => assert_eq!(b.as_ref(), b"m1"),
+            _ => panic!(),
+        }
+        match second {
+            Message::User(b) => assert_eq!(b.as_ref(), b"m2"),
+            _ => panic!(),
         }
     }
 

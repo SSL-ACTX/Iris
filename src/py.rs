@@ -908,6 +908,214 @@ impl PyRuntime {
         Ok(self.inner.spawn_handler_with_budget(handler, budget))
     }
 
+    /// Bounded mailbox variant of spawn_py_handler.
+    fn spawn_py_handler_bounded(
+        &self,
+        py_callable: PyObject,
+        budget: usize,
+        capacity: usize,
+        release_gil: Option<bool>,
+    ) -> PyResult<u64> {
+        // reuse almost identical logic to spawn_py_handler but call bounded runtime
+        let release = release_gil.unwrap_or(false);
+        let behavior = Arc::new(parking_lot::RwLock::new(py_callable));
+        static RELEASE_GIL_THREADS: AtomicUsize = AtomicUsize::new(0);
+        const DEFAULT_MAX_RELEASE_GIL_THREADS: usize = 256;
+        const DEFAULT_GIL_POOL_SIZE: usize = 8;
+
+        static GIL_WORKER_POOL: OnceLock<Arc<GilPool>> = OnceLock::new();
+
+        enum PoolTask {
+            Execute {
+                behavior: Arc<parking_lot::RwLock<PyObject>>,
+                bytes: bytes::Bytes,
+            },
+            HotSwap {
+                behavior: Arc<parking_lot::RwLock<PyObject>>,
+                ptr: usize,
+            },
+        }
+
+        struct GilPool {
+            sender: cb_channel::Sender<PoolTask>,
+        }
+
+        impl GilPool {
+            fn new(size: usize) -> Self {
+                let (tx, rx) = cb_channel::unbounded::<PoolTask>();
+                for _ in 0..size {
+                    let rx = rx.clone();
+                    std::thread::spawn(move || {
+                        loop {
+                            if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                                break;
+                            }
+                            match rx.recv_timeout(Duration::from_millis(100)) {
+                                Ok(task) => match task {
+                                    PoolTask::Execute { behavior, bytes } => {
+                                        if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                                            break;
+                                        }
+                                        Python::with_gil(|py| {
+                                            let guard = behavior.read();
+                                            let cb = guard.as_ref(py);
+                                            let pybytes = PyBytes::new(py, &bytes);
+                                            if let Err(e) = cb.call1((pybytes,)) {
+                                                eprintln!("[Iris] Python actor exception: {}", e);
+                                                e.print(py);
+                                            }
+                                        });
+                                    }
+                                    PoolTask::HotSwap { behavior, ptr } => {
+                                        if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                                            break;
+                                        }
+                                        Python::with_gil(|py| unsafe {
+                                            let new_obj = PyObject::from_owned_ptr(
+                                                py,
+                                                ptr as *mut pyo3::ffi::PyObject,
+                                            );
+                                            *behavior.write() = new_obj;
+                                        });
+                                    }
+                                },
+                                Err(cb_channel::RecvTimeoutError::Timeout) => continue,
+                                       Err(cb_channel::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+                    });
+                }
+                GilPool { sender: tx }
+            }
+        }
+
+        let maybe_tx = if release {
+            let (max_threads, pool_size) = self.inner.get_release_gil_limits();
+            let strict = self.inner.is_release_gil_strict();
+
+            let prev = RELEASE_GIL_THREADS.fetch_add(1, Ordering::SeqCst);
+            if prev >= max_threads {
+                RELEASE_GIL_THREADS.fetch_sub(1, Ordering::SeqCst);
+                if strict {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "release_gil thread limit exceeded",
+                    ));
+                }
+                let _ = GIL_WORKER_POOL
+                    .get_or_init(|| Arc::new(GilPool::new(pool_size)))
+                    .clone();
+                None
+            } else {
+                let (tx, rx) = cb_channel::unbounded::<PoolTask>();
+                let b_thread = behavior.clone();
+
+                std::thread::spawn(move || {
+                    loop {
+                        // Prevent thread hanging if interpreter goes down
+                        if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                            RELEASE_GIL_THREADS.fetch_sub(1, Ordering::SeqCst);
+                            break;
+                        }
+
+                        // Timeouts allow checking for `Py_IsInitialized` state seamlessly
+                        match rx.recv_timeout(Duration::from_millis(100)) {
+                            Ok(msg) => match msg {
+                                PoolTask::Execute { behavior, bytes } => {
+                                    if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                                        continue;
+                                    }
+                                    Python::with_gil(|py| {
+                                        let guard = behavior.read();
+                                        let cb = guard.as_ref(py);
+                                        let pybytes = PyBytes::new(py, &bytes);
+                                        if let Err(e) = cb.call1((pybytes,)) {
+                                            eprintln!("[Iris] Python actor exception: {}", e);
+                                            e.print(py);
+                                        }
+                                    });
+                                }
+                                PoolTask::HotSwap { behavior, ptr } => {
+                                    if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                                        continue;
+                                    }
+                                    Python::with_gil(|py| unsafe {
+                                        let new_obj = PyObject::from_owned_ptr(
+                                            py,
+                                            ptr as *mut pyo3::ffi::PyObject,
+                                        );
+                                        *behavior.write() = new_obj;
+                                    });
+                                }
+                            },
+                            Err(cb_channel::RecvTimeoutError::Timeout) => continue,
+                            Err(cb_channel::RecvTimeoutError::Disconnected) => {
+                                RELEASE_GIL_THREADS.fetch_sub(1, Ordering::SeqCst);
+                                break;
+                            }
+                        }
+                    }
+                });
+
+                Some(tx)
+            }
+        } else {
+            None
+        };
+
+        let handler = move |mut rx: crate::mailbox::MailboxReceiver| {
+            let maybe_tx = maybe_tx.clone();
+            let behavior = behavior.clone();
+            async move {
+                while let Some(msg) = rx.recv().await {
+                    if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                        return;
+                    }
+
+                    if let Some(tx) = &maybe_tx {
+                        match msg {
+                            crate::mailbox::Message::User(bytes) => {
+                                let task = PoolTask::Execute { behavior: behavior.clone(), bytes: bytes.clone() };
+                                let _ = tx.send(task);
+                            }
+                            crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
+                                let task = PoolTask::HotSwap { behavior: behavior.clone(), ptr };
+                                let _ = tx.send(task);
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        match msg {
+                            crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
+                                Python::with_gil(|py| unsafe {
+                                    let new_obj = PyObject::from_owned_ptr(
+                                        py,
+                                        ptr as *mut pyo3::ffi::PyObject,
+                                    );
+                                    let mut guard = behavior.write();
+                                    *guard = new_obj;
+                                });
+                            }
+                            crate::mailbox::Message::User(bytes) => {
+                                Python::with_gil(|py| {
+                                    let guard = behavior.read();
+                                    let cb = guard.as_ref(py);
+                                    let pybytes = PyBytes::new(py, &bytes);
+                                    if let Err(e) = cb.call1((pybytes,)) {
+                                        eprintln!("[Iris] Python actor exception: {}", e);
+                                        e.print(py);
+                                    }
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        };
+
+        Ok(self.inner.spawn_actor_with_budget_bounded(handler, budget, capacity))
+    }
+
     /// Spawn a child actor; lifetime is tied to `parent`.
     fn spawn_child(
         &self,

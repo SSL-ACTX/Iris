@@ -445,6 +445,31 @@ In addition to the environment variables documented above, the Python runtime ex
 
 ---
 
+### Bounded Mailboxes
+
+By default, all Iris mailboxes are unbounded. For some high-throughput
+workloads you may want a fixed capacity with a *drop-new* policy — useful for
+rate-limiting fast producers. Use `Runtime.spawn_py_handler_bounded` in Python
+or `runtime.spawn_bounded` in Node and specify the mailbox capacity (in
+messages).
+
+Python example:
+
+```python
+from iris import Runtime
+rt = Runtime()
+
+# handler simply prints messages
+pid = rt.spawn_py_handler_bounded(lambda m: print('got', m), budget=100, capacity=2)
+
+# first two sends succeed
+assert rt.send(pid, b'one')
+assert rt.send(pid, b'two')
+
+# third message is dropped and send returns False
+assert not rt.send(pid, b'three')
+```
+
 ### Python example — toggling GIL release
 
 You can control whether push-based Python actors run their callbacks on a blocking thread
