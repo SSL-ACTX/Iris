@@ -45,6 +45,29 @@ class Runtime:
         """
         return self._inner.spawn_with_mailbox(handler, budget)
 
+    def spawn_child(self, parent: int, handler, budget: int = 100, release_gil: bool = False) -> int:
+        """
+        Spawn a new actor whose lifetime is tied to `parent`.
+
+        When the parent PID exits for any reason, the child will be
+        automatically stopped as well.  The handler semantics and
+        `release_gil` behaviour mirror :meth:`spawn`.
+
+        Args:
+            parent: PID of the parent actor.
+            handler: Callable(message)
+            budget: Reduction budget.
+            release_gil: whether to offload the handler to a dedicated GIL thread.
+        """
+        return self._inner.spawn_child_py_handler(parent, handler, budget, release_gil)
+
+    def spawn_child_with_mailbox(self, parent: int, handler, budget: int = 100) -> int:
+        """
+        Like :meth:`spawn_with_mailbox` but the resulting actor is killed when
+        the given parent PID exits.
+        """
+        return self._inner.spawn_child_with_mailbox(parent, handler, budget)
+
     def send(self, pid: int, data: bytes) -> bool:
         """Send data to a specific local PID."""
         return self._inner.send(pid, data)

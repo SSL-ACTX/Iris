@@ -198,7 +198,45 @@ rt.spawnWithMailbox(sagaCoordinator, 100);
 
 ```
 
-### 3. Service Discovery & Registry
+### 3. Structured Concurrency
+
+Actors can now be spawned with a **parent** PID. When the parent exits (normal or crash) all of its direct children are automatically stopped as well. This mirrors the behaviour of many functional runtimes and makes it easy to manage lifetimes for short‑lived helper tasks.
+
+#### Rust
+
+```rust
+let rt = Runtime::new();
+let parent = rt.spawn_actor(|mut rx| async move { /* ... */ });
+let child = rt.spawn_child(parent, |mut rx| async move { /* will die with parent */ });
+
+rt.send(parent, Message::User(Bytes::from("quit"))).unwrap();
+// after the parent exits the child mailbox is closed as well
+assert!(!rt.is_alive(child));
+```
+
+#### Python
+
+```python
+rt = iris.Runtime()
+parent = rt.spawn(lambda msg: print("parent got", msg))
+child = rt.spawn_child(parent, lambda msg: print("child got", msg))
+
+rt.send(parent, b"quit")
+import time; time.sleep(0.1)
+assert not rt.is_alive(child)
+```
+
+There are three variants of the API:
+
+- `spawn_child(parent, handler)` – mailbox‑based actor.
+- `spawn_child_with_budget(parent, handler, budget)` – same but with a reduction budget.
+- `spawn_child_handler_with_budget(parent, handler, budget)` – message‑style handler (used by Python/Node wrappers).
+
+Python and Node bindings expose matching helpers (`spawn_child`, `spawn_child_with_mailbox`, etc.) which accept the same arguments as their non‑child counterparts plus the parent PID.
+
+---
+
+### 4. Service Discovery & Registry
 
 > [!NOTE]
 > **Network hardening:** the underlying TCP protocol now imposes a 1 MiB

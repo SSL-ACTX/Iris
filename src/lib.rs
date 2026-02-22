@@ -53,6 +53,10 @@ pub struct Runtime {
     registry: Arc<registry::NameRegistry>,
     /// Optional per-path supervisors (shallow supervisors keyed by path).
     path_supervisors: Arc<DashMap<String, Arc<supervisor::Supervisor>>>,
+    /// Maps a child PID to its parent PID for structured concurrency.
+    parent_of: Arc<DashMap<Pid, Pid>>,
+    /// Tracks direct children of each parent PID.
+    children_by_parent: Arc<DashMap<Pid, Vec<Pid>>>,
     // Runtime-configurable limits for Python GIL-release behavior
     release_gil_max_threads: Arc<Mutex<usize>>,
     gil_pool_size: Arc<Mutex<usize>>,
@@ -78,6 +82,8 @@ impl Runtime {
             network: Arc::new(Mutex::new(None)),
             registry: Arc::new(registry::NameRegistry::new()),
             path_supervisors: Arc::new(DashMap::new()),
+            parent_of: Arc::new(DashMap::new()),
+            children_by_parent: Arc::new(DashMap::new()),
             release_gil_max_threads: Arc::new(Mutex::new(256)),
             gil_pool_size: Arc::new(Mutex::new(8)),
             release_gil_strict: Arc::new(Mutex::new(false)),
@@ -419,6 +425,7 @@ impl Runtime {
         let supervisor2 = self.supervisor.clone();
         let slab2 = self.slab.clone();
         let path_supervisors2 = self.path_supervisors.clone();
+        let rt_exit_clone = self.clone();
 
         RUNTIME.spawn(async move {
             let actor_handle = tokio::spawn(handler(rx));
@@ -447,6 +454,9 @@ impl Runtime {
             }
             slab2.lock().unwrap().deallocate(pid);
 
+            // structured concurrency cleanup
+            rt_exit_clone.handle_exit_internal(pid);
+
             let linked = supervisor2.linked_pids(pid);
             for lp in linked {
                 if let Some(sender) = mailboxes2.get(&lp) {
@@ -473,6 +483,7 @@ impl Runtime {
         let supervisor2 = self.supervisor.clone();
         let slab2 = self.slab.clone();
         let path_supervisors2 = self.path_supervisors.clone();
+        let rt_exit_clone = self.clone();
         let fut = handler(rx);
 
         RUNTIME.spawn(async move {
@@ -499,6 +510,8 @@ impl Runtime {
                 }
             }
             slab2.lock().unwrap().deallocate(pid);
+
+            rt_exit_clone.handle_exit_internal(pid);
 
             let linked = supervisor2.linked_pids(pid);
             for lp in linked {
@@ -527,6 +540,7 @@ impl Runtime {
         let mailboxes2 = self.mailboxes.clone();
         let slab2 = self.slab.clone();
         let path_supervisors2 = self.path_supervisors.clone();
+        let rt_exit_clone = self.clone();
 
         RUNTIME.spawn(async move {
             let h_loop = handler.clone();
@@ -567,6 +581,9 @@ impl Runtime {
             }
             slab2.lock().unwrap().deallocate(pid);
 
+            // structured concurrency cleanup
+            rt_exit_clone.handle_exit_internal(pid);
+
             let linked = supervisor2.linked_pids(pid);
             for lp in linked {
                 if let Some(sender) = mailboxes2.get(&lp) {
@@ -576,6 +593,24 @@ impl Runtime {
             }
         });
 
+        pid
+    }
+
+    /// Spawn a new message-handler actor tied to `parent`.
+    pub fn spawn_child_handler_with_budget<H, Fut>(&self, parent: Pid, handler: H, budget: usize) -> Pid
+    where
+        H: Fn(mailbox::Message) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let pid = self.spawn_handler_with_budget(handler, budget);
+        self.parent_of.insert(pid, parent);
+        self.children_by_parent
+            .entry(parent)
+            .or_insert_with(Vec::new)
+            .push(pid);
+        if !self.is_alive(parent) {
+            self.stop(pid);
+        }
         pid
     }
 
@@ -591,6 +626,7 @@ impl Runtime {
         let mailboxes2 = self.mailboxes.clone();
         let slab2 = self.slab.clone();
         let path_supervisors2 = self.path_supervisors.clone();
+        let rt_exit_clone = self.clone();
 
         RUNTIME.spawn(async move {
             let v_clone = vec.clone();
@@ -626,6 +662,8 @@ impl Runtime {
                 }
             }
             slab2.lock().unwrap().deallocate(pid);
+
+            rt_exit_clone.handle_exit_internal(pid);
 
             let linked = supervisor2.linked_pids(pid);
             for lp in linked {
@@ -696,6 +734,47 @@ impl Runtime {
         self.supervisor.add_child(pid, spec);
     }
 
+    /// Spawn an actor whose lifetime is tied to `parent`.
+    /// When the parent PID exits (normal or crash) the child will be
+    /// automatically stopped as well.  The returned PID behaves just like
+    /// one created with `spawn_actor`.
+    pub fn spawn_child<H, Fut>(&self, parent: Pid, handler: H) -> Pid
+    where
+        H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let pid = self.spawn_actor(handler);
+        // record relationships for structured concurrency
+        self.parent_of.insert(pid, parent);
+        self.children_by_parent
+            .entry(parent)
+            .or_insert_with(Vec::new)
+            .push(pid);
+        // if parent is already dead, immediately stop the child
+        if !self.is_alive(parent) {
+            self.stop(pid);
+        }
+        pid
+    }
+
+    /// Same as `spawn_child` but accepts a budget for cooperative scheduling.
+    pub fn spawn_child_with_budget<H, Fut>(&self, parent: Pid, handler: H, budget: usize) -> Pid
+    where
+        H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let pid = self.spawn_actor_with_budget(handler, budget);
+        self.parent_of.insert(pid, parent);
+        self.children_by_parent
+            .entry(parent)
+            .or_insert_with(Vec::new)
+            .push(pid);
+        if !self.is_alive(parent) {
+            self.stop(pid);
+        }
+        pid
+    }
+
     /// Attach a factory-based child spec to a path-scoped supervisor.
     pub fn path_supervise_with_factory(
         &self,
@@ -714,6 +793,31 @@ impl Runtime {
 
     pub fn link(&self, a: Pid, b: Pid) {
         self.supervisor.link(a, b);
+    }
+
+    /// Internal helper invoked when any actor exits to maintain parent/child
+    /// state and to enforce structured concurrency.  This is called from
+    /// each spawn_* helper after the actor has torn down its mailbox and been
+    /// deallocated.
+    fn handle_exit_internal(&self, pid: Pid) {
+        // remove the pid from its parent's child list (if any)
+        if let Some((_, parent)) = self.parent_of.remove(&pid) {
+            if let Some(mut entry) = self.children_by_parent.get_mut(&parent) {
+                entry.retain(|&p| p != pid);
+                if entry.is_empty() {
+                    self.children_by_parent.remove(&parent);
+                }
+            }
+        }
+
+        // if this pid itself is a parent, kill its current children
+        if let Some((_, children)) = self.children_by_parent.remove(&pid) {
+            for child in children {
+                // drop reverse mapping and close mailbox to stop actor
+                let _ = self.parent_of.remove(&child);
+                self.mailboxes.remove(&child);
+            }
+        }
     }
 
     pub fn unlink(&self, a: Pid, b: Pid) {

@@ -147,3 +147,149 @@ async fn py_runtime_spawn_and_send() {
         assert_eq!(pids[0], pid);
     });
 }
+
+// ---------- structured concurrency tests ----------
+
+#[tokio::test]
+async fn py_structured_concurrency_normal_and_crash() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        let rt_obj = runtime_type.call0().expect("construct PyRuntime");
+        rt_obj.into_py(py)
+    });
+
+    // helper to spawn a simple handler that stores messages in a list
+    let make_handler = |py: Python<'_>| {
+        let locals = pyo3::types::PyDict::new(py);
+        py.run(
+            "def make_cb(lst):\n    def cb(b): lst.append(b)\n    return cb\n",
+            None,
+            Some(locals),
+        )
+        .unwrap();
+        let lst = pyo3::types::PyList::empty(py);
+        let cb = locals
+            .get_item("make_cb")
+            .unwrap()
+            .call1((lst.clone(),))
+            .unwrap()
+            .into_py(py);
+        (lst.into_py(py), cb)
+    };
+
+    // normal-exit scenario
+    let (_parent_list, parent_cb): (pyo3::PyObject, pyo3::PyObject) = Python::with_gil(|py| make_handler(py));
+    let parent_pid: u64 = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("spawn_py_handler", (parent_cb.clone(), 1usize))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+
+    // debug: list available methods on PyRuntime
+    Python::with_gil(|py| {
+        let obj = rt_py.as_ref(py);
+        let dirlist: Vec<String> = obj
+            .dir()
+            .iter()
+            .map(|item| item.extract::<String>().unwrap())
+            .collect();
+        eprintln!("PyRuntime attributes: {:?}", dirlist);
+    });
+    let child_pid: u64 = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("spawn_child", (parent_pid, parent_cb.clone(), 1usize, false))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+
+    // send a message to the parent; the handler itself doesn't exit
+    Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("send", (parent_pid, pyo3::types::PyBytes::new(py, b"ok")))
+            .unwrap();
+    });
+
+    // now explicitly stop the parent (normal shutdown) to exercise structured concurrency
+    Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("stop", (parent_pid,))
+            .unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let alive: bool = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("is_alive", (child_pid,))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+    assert!(!alive, "child should die when parent exits normally");
+
+    // crash scenario: spawn parent that panics
+    let crash_cb: pyo3::PyObject = Python::with_gil(|py| {
+        let src = "def cb(_):\n    raise Exception('crash')\n";
+        let locals = pyo3::types::PyDict::new(py);
+        py.run(src, None, Some(locals)).unwrap();
+        locals.get_item("cb").unwrap().into_py(py)
+    });
+    let parent_crash: u64 = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("spawn_py_handler", (crash_cb.clone(), 1usize))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+    let child_crash: u64 = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("spawn_child", (parent_crash, crash_cb, 1usize, false))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+
+    Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("send", (parent_crash, pyo3::types::PyBytes::new(py, b"go")))
+            .unwrap();
+    });
+
+    // wait a bit for Python exception to be logged
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // explicitly terminate the parent after crash
+    Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("stop", (parent_crash,))
+            .unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let alive2: bool = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("is_alive", (child_crash,))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+    assert!(!alive2, "child should die when parent crashes");
+}

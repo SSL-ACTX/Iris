@@ -233,6 +233,73 @@ impl NodeRuntime {
     }
 
     #[napi]
+    pub fn spawn_child(&self, parent: i64, handler: JsFunction, budget: Option<u32>) -> Result<i64> {
+        let budget = budget.unwrap_or(100) as usize;
+
+        let tsfn: ThreadsafeFunction<Message, ErrorStrategy::Fatal> = handler
+            .create_threadsafe_function(0, |ctx| {
+                let msg = ctx.value;
+                let js_val = message_to_js(&ctx.env, msg)?;
+                Ok(vec![js_val])
+            })?;
+
+        let behavior = Arc::new(parking_lot::RwLock::new(tsfn));
+        let handler_wrapper = move |msg: crate::mailbox::Message| {
+            let b = behavior.clone();
+            async move {
+                match msg {
+                    crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
+                        unsafe {
+                            let new_tsfn_box = Box::from_raw(
+                                ptr as *mut ThreadsafeFunction<Message, ErrorStrategy::Fatal>,
+                            );
+                            let mut guard = b.write();
+                            *guard = *new_tsfn_box;
+                        }
+                    }
+                    crate::mailbox::Message::User(bytes) => {
+                        let guard = b.read();
+                        guard.call(msg, ThreadsafeFunctionCallMode::NonBlocking);
+                    }
+                    _ => {}
+                }
+            }
+        };
+
+        let pid = self
+            .inner
+            .spawn_child_with_budget(parent as u64, handler_wrapper, budget);
+        Ok(pid as i64)
+    }
+
+    #[napi]
+    pub fn spawn_child_with_mailbox(&self, parent: i64, handler: JsFunction, budget: Option<u32>) -> Result<i64> {
+        let budget = budget.unwrap_or(100) as usize;
+
+        let tsfn: ThreadsafeFunction<JsMailbox, ErrorStrategy::Fatal> =
+            handler.create_threadsafe_function(0, |ctx| Ok(vec![ctx.value]))?;
+
+        let pid = self
+            .inner
+            .spawn_child_with_budget(parent as u64, move |rx| async move {
+                let mailbox = JsMailbox {
+                    inner: Arc::new(Mutex::new(rx)),
+                };
+                tsfn.call(mailbox.clone(), ThreadsafeFunctionCallMode::NonBlocking);
+
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if Arc::strong_count(&mailbox.inner) <= 1 {
+                        break;
+                    }
+                }
+            },
+            budget);
+
+        Ok(pid as i64)
+    }
+
+    #[napi]
     pub fn send(&self, pid: i64, data: Buffer) -> Result<bool> {
         let msg = crate::mailbox::Message::User(bytes::Bytes::from(data.to_vec()));
         Ok(self.inner.send(pid as u64, msg).is_ok())

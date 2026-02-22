@@ -214,6 +214,64 @@ async fn supervisor_restart_one_for_one() {
     }));
 }
 
+// ------------------- Structured Concurrency -------------------
+
+#[tokio::test]
+async fn children_die_with_parent_normal_exit() {
+    let rt = Runtime::new();
+
+    // parent waits for a single message then exits
+    let parent = rt.spawn_actor(|mut rx| async move {
+        let _ = rx.recv().await;
+    });
+
+    // spawn two levels of children
+    let child = rt.spawn_child(parent, |mut rx| async move {
+        let _ = rx.recv().await;
+    });
+    let grandchild = rt.spawn_child(child, |mut rx| async move {
+        let _ = rx.recv().await;
+    });
+
+    assert!(rt.is_alive(child));
+    assert!(rt.is_alive(grandchild));
+
+    // send the signal that allows parent to finish
+    rt.send(parent, Message::User(Bytes::from_static(b"stop"))).unwrap();
+    // allow the parent and its descendants to unwind
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert!(!rt.is_alive(parent));
+    assert!(!rt.is_alive(child));
+    assert!(!rt.is_alive(grandchild));
+}
+
+#[tokio::test]
+async fn children_die_if_parent_crashes() {
+    let rt = Runtime::new();
+
+    // parent actor panics when it receives any message
+    let parent = rt.spawn_handler_with_budget(
+        move |_msg| async move {
+            panic!("parent crash");
+        },
+        1,
+    );
+
+    let child = rt.spawn_child(parent, |mut rx| async move {
+        // keep alive until mailbox closed
+        while rx.recv().await.is_some() {
+            tokio::task::yield_now().await;
+        }
+    });
+
+    rt.send(parent, Message::User(Bytes::from_static(b"boom"))).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert!(!rt.is_alive(parent));
+    assert!(!rt.is_alive(child));
+}
+
 #[tokio::test]
 async fn supervisor_restart_all() {
     use std::sync::Arc;
