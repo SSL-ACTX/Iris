@@ -49,4 +49,5 @@ Rules for AI contributors (must follow)
 2. Do not change `Pid` layout or `Message` type without adding migration/tests. ⚠️
 3. Preserve concurrency invariants: prefer `DashMap`/`Arc` and avoid global mutable state. 🔧
 4. Use `tokio` async patterns and `#[tokio::test]` for async behavior. 🔁
-5. When modifying `ReductionLimiter` or other pinned futures, demonstrate correctness with a unit test covering yield behavior.
+5. Apply **DRY** principles: refactor duplicate logic into shared helpers and avoid copy-paste. 💡
+6. When modifying `ReductionLimiter` or other pinned futures, demonstrate correctness with a unit test covering yield behavior.
