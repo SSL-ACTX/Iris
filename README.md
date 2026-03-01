@@ -7,7 +7,7 @@
 ![License](https://img.shields.io/badge/license-AGPL_3.0-green.svg?style=for-the-badge)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android-lightgrey.svg?style=for-the-badge&logo=linux)
 
-**High-performance, hot-swappable distributed actor mesh for the modern era.**
+**High-performance, hot-swappable distributed actor mesh for the modern era (with experimental JIT/offload support).**
 
 [Features](#-core-capabilities) • [Architecture](#-technical-deep-dive) • [Installation](#-quick-start) • [Usage](#-usage-examples) • [Distributed Mesh](#-the-distributed-mesh)
 
@@ -18,6 +18,8 @@
 ## Overview
 
 **Iris** is a distributed actor-model runtime built in Rust with deep **Python** and **Node.js** integration. It is designed for systems that require the extreme concurrency of Erlang, the raw speed of Rust, and the flexibility of high-level scripting languages.
+
+In addition to its core actor mesh, Iris also includes **experimental JIT/offload support for Python**, allowing certain compute-heavy functions to be compiled to native code or dispatched into a specialized actor pool with a simple decorator.
 
 Unlike standard message queues, Iris implements a **cooperative reduction-based scheduler**. This allows the runtime to manage millions of actors with microsecond latency, providing built-in fault tolerance, hot code swapping, and location-transparent messaging across a global cluster.
 
@@ -50,6 +52,9 @@ Built-in fault tolerance modeled after the "Let it Crash" philosophy.
 * **Heartbeat Monitoring:** The mesh automatically sends `PING`/`PONG` signals (0x02/0x03) to detect silent failures (e.g., GIL freezes or half-open TCP connections).
 * **Structured System Messages:** Actor exits, hot-swaps, and heartbeats are delivered as System Messages, providing rich context for supervisor logic.
 * **Self-Healing Factories:** Define closures that automatically re-resolve and restart connections when a remote node comes back online.
+
+### 🧠 Experimental JIT / Compute Offload
+A new Python decorator (`@iris.offload`) lets you mark pure‑math or CPU‑bound functions for execution outside the interpreter. Under the hood the runtime either compiles the function to native code via Cranelift or routes calls to a dedicated Rust actor pool, bypassing the GIL and dramatically speeding up hot paths. This feature is still alpha and may change.
 
 ---
 
@@ -85,6 +90,7 @@ Iris bridges the gap between Rust’s memory safety and dynamic languages using 
 * **Rust** 1.70+
 * **Python** 3.8+ OR **Node.js** 14+
 * **Maturin** (for Python) / **NAPI-RS** (for Node)
+* **Cranelift JIT backend** is included by default; needed only if you use the experimental offload/JIT APIs.
 
 ### Installation
 
@@ -115,6 +121,25 @@ npm run build
 ---
 
 ## Usage Examples
+
+### 🧠 Experimental JIT & Offload (Python only)
+```python
+import iris
+rt = iris.Runtime()
+
+@iris.offload(strategy="jit", return_type="float")
+def vector_magnitude(x: float, y: float, z: float) -> float:
+    # simple expression gets compiled or dispatched via actor pool
+    return (x*x + y*y + z*z) ** 0.5
+
+# call just like a normal Python function; the heavy work runs in native code
+result = vector_magnitude(1.0, 2.0, 3.0)
+print(result)  # 3.7416573867739416
+```
+
+> [!NOTE] 
+> The offload API also supports `strategy="actor"` for routing to a dedicated compute pool; consult `iris.JIT.md` for details.
+
 
 Iris provides a unified API across both supported languages.
 
@@ -563,6 +588,7 @@ Supported. Ensure you have the latest Microsoft C++ Build Tools installed for Py
 
 > [!IMPORTANT]
 > **Production Status:** Iris is currently in **Alpha**.
+> * **Experimental Features:** The JIT/offload APIs are extremely new and may change or break between releases. Use with caution.
 > * **Performance Metrics (v0.3.0):**
 > * **Push Actors:** Validated to scale to **100k+ concurrent actors** with message throughput exceeding **~1.2M+ msgs/sec** on modern cloud vCPUs and **~409k msgs/sec** on single-core legacy hardware.
 > * **Pull Actors:** High-performance threaded actors supporting **100k+ concurrent instances** with throughput reaching **~1.5M+ msgs/sec**, demonstrating massive scaling beyond traditional thread-pool limitations.
