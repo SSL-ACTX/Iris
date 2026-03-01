@@ -13,6 +13,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 num_cpus = "*"
+cranelift = "0.87"
+cranelift-module = "0.87"
+cranelift-jit = "0.87"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 dashmap = "5"
 parking_lot = "0.12"
