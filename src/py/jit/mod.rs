@@ -350,44 +350,91 @@ unsafe fn buffer_ptr_len(obj: &PyAny) -> Option<(*const f64, usize)> {
 }
 
 /// Highly optimized helper to execute a JIT compiled function. 
-/// Handles zero-copy buffers (including vectorization) and scalar argument unpacking via stack.
+/// Handles zero-copy buffers (including multi-argument vectorization) and scalar argument unpacking via stack.
 #[cfg(feature = "pyo3")]
 #[inline(always)]
 fn execute_jit_func(py: Python, entry: &JitEntry, args: &PyTuple) -> PyResult<PyObject> {
     let arg_count = args.len();
 
-    // Try zero-copy buffer path first
-    if arg_count == 1 {
+    // 1. Single buffer acting as the entire argument array for a multi-argument function
+    if arg_count == 1 && entry.arg_count > 1 {
         if let Ok(item) = args.get_item(0) {
             if let Some((ptr, len)) = unsafe { buffer_ptr_len(item) } {
-                let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
-                
-                // Vectorization path: Apply a 1-argument function across the entire buffer internally
-                if entry.arg_count == 1 {
-                    let mut results = Vec::with_capacity(len);
-                    for i in 0..len {
-                        let res = f(unsafe { ptr.add(i) });
-                        results.push(res);
-                    }
-                    
-                    // Zero-copy output: construct a Python array.array directly from our memory bytes
-                    let byte_slice = unsafe {
-                        std::slice::from_raw_parts(
-                            results.as_ptr() as *const u8,
-                            results.len() * std::mem::size_of::<f64>(),
-                        )
-                    };
-                    let py_bytes = PyBytes::new(py, byte_slice);
-                    let array_mod = py.import("array")?;
-                    let array_obj = array_mod.getattr("array")?.call1(("d", py_bytes))?;
-                    
-                    return Ok(array_obj.into_py(py));
-                } 
-                // Fallback: The buffer itself represents a single set of arguments
-                else if len == entry.arg_count {
+                if len == entry.arg_count {
+                    let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
                     let res = f(ptr);
                     return Ok(res.into_py(py));
                 }
+            }
+        }
+    }
+
+    // 2. Vectorization: 1 or more arguments, all of which must be buffers of the same length
+    if arg_count == entry.arg_count && arg_count > 0 {
+        let mut ptrs = Vec::with_capacity(arg_count);
+        let mut common_len = None;
+        let mut all_buffers = true;
+
+        for i in 0..arg_count {
+            if let Ok(item) = args.get_item(i) {
+                if let Some((ptr, len)) = unsafe { buffer_ptr_len(item) } {
+                    if let Some(c_len) = common_len {
+                        if len != c_len {
+                            all_buffers = false;
+                            break;
+                        }
+                    } else {
+                        common_len = Some(len);
+                    }
+                    ptrs.push(ptr);
+                } else {
+                    all_buffers = false;
+                    break;
+                }
+            } else {
+                all_buffers = false;
+                break;
+            }
+        }
+
+        if all_buffers {
+            if let Some(len) = common_len {
+                let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+                let mut results = Vec::with_capacity(len);
+
+                const MAX_FAST_ARGS: usize = 8;
+                if arg_count <= MAX_FAST_ARGS {
+                    for i in 0..len {
+                        // Gather non-contiguous arguments into a stack array for Cranelift
+                        let mut iter_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
+                        for j in 0..arg_count {
+                            iter_args[j] = unsafe { *ptrs[j].add(i) };
+                        }
+                        results.push(f(iter_args.as_ptr()));
+                    }
+                } else {
+                    // Fallback for > 8 array arguments
+                    for i in 0..len {
+                        let mut iter_args = Vec::with_capacity(arg_count);
+                        for j in 0..arg_count {
+                            iter_args.push(unsafe { *ptrs[j].add(i) });
+                        }
+                        results.push(f(iter_args.as_ptr()));
+                    }
+                }
+
+                // Zero-copy output: construct a Python array.array directly from our memory bytes
+                let byte_slice = unsafe {
+                    std::slice::from_raw_parts(
+                        results.as_ptr() as *const u8,
+                        results.len() * std::mem::size_of::<f64>(),
+                    )
+                };
+                let py_bytes = PyBytes::new(py, byte_slice);
+                let array_mod = py.import("array")?;
+                let array_obj = array_mod.getattr("array")?.call1(("d", py_bytes))?;
+                
+                return Ok(array_obj.into_py(py));
             }
         }
     }
@@ -398,7 +445,7 @@ fn execute_jit_func(py: Python, entry: &JitEntry, args: &PyTuple) -> PyResult<Py
         ));
     }
 
-    // Fast path for small number of scalar arguments (stack allocated array)
+    // 3. Fast path for small number of standard Python scalar arguments
     const MAX_FAST_ARGS: usize = 8;
     if arg_count <= MAX_FAST_ARGS {
         let mut stack_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
@@ -416,7 +463,7 @@ fn execute_jit_func(py: Python, entry: &JitEntry, args: &PyTuple) -> PyResult<Py
         return Ok(res.into_py(py));
     }
 
-    // Fallback for > 8 args: heap allocation
+    // 4. Fallback for > 8 scalar args: heap allocation
     let mut heap_args = Vec::with_capacity(arg_count);
     for i in 0..arg_count {
         let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
