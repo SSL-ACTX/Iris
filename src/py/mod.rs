@@ -7,6 +7,7 @@ pub mod utils;
 pub mod mailbox;
 pub mod runtime;
 pub mod wrappers;
+pub mod jit;
 
 // re-export a few helpers for external callers (tests, build scripts, etc.)
 pub use wrappers::{make_module, init};

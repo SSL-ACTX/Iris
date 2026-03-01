@@ -2,10 +2,27 @@
 import asyncio
 from typing import Optional, Callable, Union, Awaitable
 
+# bring offload decorator into package namespace
+from .jit import offload
+
+# import core symbols from the compiled extension.  `register_offload`
+# may not exist early in the build process, so import it conditionally.
 try:
-    from .iris import PyRuntime, PySystemMessage, version, allocate_buffer, PyMailbox
+    from .iris import PyRuntime, PySystemMessage, version, allocate_buffer, PyMailbox, register_offload
 except ImportError:
-    from iris import PyRuntime, PySystemMessage, version, allocate_buffer, PyMailbox
+    try:
+        from iris import PyRuntime, PySystemMessage, version, allocate_buffer, PyMailbox, register_offload
+    except ImportError:
+        # fallback: we still want the package to import even if the extension
+        # is not yet compiled (e.g. during early development or CI setup).
+        class _Dummy:
+            pass
+        register_offload = None  # type: ignore
+        # we will lazily import runtime types when needed
+        def __getattr__(name):
+            if name in ("PyRuntime", "PySystemMessage", "version", "allocate_buffer", "PyMailbox"):
+                raise ImportError(f"module not built yet: {name}")
+            raise AttributeError(name)
 
 class Runtime:
     def __init__(self):
