@@ -1,6 +1,6 @@
 <div align="center">
 
-![Iris Banner](https://svg-banners.vercel.app/api?type=luminance&text1=Iris%20🌸&width=800&height=400&color=FFB6C1)
+![Iris Banner](https://svg-banners.vercel.app/api?type=luminance&text1=Iris%20🌸&width=800&height=200&color=FFB6C1)
 
 ![Version](https://img.shields.io/badge/version-0.3.0-blue.svg?style=for-the-badge)
 ![Language](https://img.shields.io/badge/language-Rust%20%7C%20Python%20%7C%20Node.js-orange.svg?style=for-the-badge&logo=rust)
