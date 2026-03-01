@@ -44,5 +44,28 @@ async fn py_jit_offload_decorator_async() {
             .extract(py)
             .unwrap();
         assert_eq!(ret2, 8.0);
+
+        // register a 3-arg function to test zero-copy buffer path
+        py.run("def bar(x,y,z): return x+y+z", None, Some(locals)).unwrap();
+        let bar = locals.get_item("bar").unwrap().to_object(py);
+        let decorated3: PyObject = register
+            .call1(py, (
+                bar.clone(),
+                Some("jit"),
+                Some("float"),
+                Some("x+y+z".to_string()),
+                Some(vec!["x".to_string(), "y".to_string(), "z".to_string()]),
+            ))
+            .unwrap();
+        assert!(decorated3.as_ref(py).is_callable());
+        // build a buffer of three doubles
+        py.run("from array import array\nbuf = array('d', [1.0, 2.0, 3.0])", None, Some(locals)).unwrap();
+        let buf = locals.get_item("buf").unwrap();
+        let ret3: f64 = jitcall
+            .call1(py, (bar, PyTuple::new(py, &[buf]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(ret3, 6.0);
     });
 }

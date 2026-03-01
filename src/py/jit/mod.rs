@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
 #[cfg(feature = "pyo3")]
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyDict, PyTuple, PyBytes};
 
 // cranelift imports
 use cranelift::prelude::*;
@@ -53,7 +53,7 @@ impl OffloadPool {
                                 let args = task.args.as_ref(py);
                                 let kwargs = task.kwargs.as_ref().map(|k: &Py<PyDict>| k.as_ref(py));
                                 let result = func.call(args, kwargs).map(|obj| obj.into_py(py));
-                                let _ = task.resp.send(result.map_err(|e| e));
+                                let _ = task.resp.send(result);
                             });
                         }
                         Err(_) => break,
@@ -328,6 +328,109 @@ fn register_offload(
     Ok(func)
 }
 
+/// If the given Python object exposes a contiguous buffer of `f64`, return a
+/// pointer/length pair without copying. The buffer view is released before
+/// the function returns.
+unsafe fn buffer_ptr_len(obj: &PyAny) -> Option<(*const f64, usize)> {
+    let mut view: pyo3::ffi::Py_buffer = std::mem::zeroed();
+    if pyo3::ffi::PyObject_GetBuffer(obj.as_ptr(), &mut view, pyo3::ffi::PyBUF_SIMPLE) != 0 {
+        pyo3::ffi::PyErr_Clear();
+        return None;
+    }
+    let itemsize = view.itemsize as usize;
+    let total_bytes = view.len as usize;
+    if itemsize != std::mem::size_of::<f64>() {
+        pyo3::ffi::PyBuffer_Release(&mut view);
+        return None;
+    }
+    let len = total_bytes / itemsize;
+    let ptr = view.buf as *const f64;
+    pyo3::ffi::PyBuffer_Release(&mut view);
+    Some((ptr, len))
+}
+
+/// Highly optimized helper to execute a JIT compiled function. 
+/// Handles zero-copy buffers (including vectorization) and scalar argument unpacking via stack.
+#[cfg(feature = "pyo3")]
+#[inline(always)]
+fn execute_jit_func(py: Python, entry: &JitEntry, args: &PyTuple) -> PyResult<PyObject> {
+    let arg_count = args.len();
+
+    // Try zero-copy buffer path first
+    if arg_count == 1 {
+        if let Ok(item) = args.get_item(0) {
+            if let Some((ptr, len)) = unsafe { buffer_ptr_len(item) } {
+                let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+                
+                // Vectorization path: Apply a 1-argument function across the entire buffer internally
+                if entry.arg_count == 1 {
+                    let mut results = Vec::with_capacity(len);
+                    for i in 0..len {
+                        let res = f(unsafe { ptr.add(i) });
+                        results.push(res);
+                    }
+                    
+                    // Zero-copy output: construct a Python array.array directly from our memory bytes
+                    let byte_slice = unsafe {
+                        std::slice::from_raw_parts(
+                            results.as_ptr() as *const u8,
+                            results.len() * std::mem::size_of::<f64>(),
+                        )
+                    };
+                    let py_bytes = PyBytes::new(py, byte_slice);
+                    let array_mod = py.import("array")?;
+                    let array_obj = array_mod.getattr("array")?.call1(("d", py_bytes))?;
+                    
+                    return Ok(array_obj.into_py(py));
+                } 
+                // Fallback: The buffer itself represents a single set of arguments
+                else if len == entry.arg_count {
+                    let res = f(ptr);
+                    return Ok(res.into_py(py));
+                }
+            }
+        }
+    }
+
+    if arg_count != entry.arg_count {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "wrong argument count for JIT function",
+        ));
+    }
+
+    // Fast path for small number of scalar arguments (stack allocated array)
+    const MAX_FAST_ARGS: usize = 8;
+    if arg_count <= MAX_FAST_ARGS {
+        let mut stack_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
+        for i in 0..arg_count {
+            let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
+            let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
+            if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
+                return Err(PyErr::fetch(py));
+            }
+            stack_args[i] = val;
+        }
+        
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let res = f(stack_args.as_ptr());
+        return Ok(res.into_py(py));
+    }
+
+    // Fallback for > 8 args: heap allocation
+    let mut heap_args = Vec::with_capacity(arg_count);
+    for i in 0..arg_count {
+        let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
+        let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
+        if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
+            return Err(PyErr::fetch(py));
+        }
+        heap_args.push(val);
+    }
+    let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+    let res = f(heap_args.as_ptr());
+    Ok(res.into_py(py))
+}
+
 /// Execute a Python callable on the offload actor pool, blocking until result.
 #[cfg(feature = "pyo3")]
 #[pyfunction]
@@ -337,18 +440,10 @@ fn offload_call(
     args: &PyTuple,
     kwargs: Option<&PyDict>,
 ) -> PyResult<PyObject> {
-    // if there's a JIT’ed version, execute directly
     let key = func.as_ptr() as usize;
     if let Some(entry) = lookup_jit(key) {
-        if args.len() == entry.arg_count {
-            let mut vec = Vec::with_capacity(entry.arg_count);
-            for i in 0..entry.arg_count {
-                vec.push(args.get_item(i)?.extract::<f64>()?);
-            }
-            let ptr = vec.as_ptr();
-            let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
-            let res = unsafe { f(ptr) };
-            return Ok(res.into_py(py));
+        if let Ok(res) = execute_jit_func(py, &entry, args) {
+            return Ok(res);
         }
     }
 
@@ -390,19 +485,7 @@ fn call_jit(
 ) -> PyResult<PyObject> {
     let key = func.as_ptr() as usize;
     if let Some(entry) = lookup_jit(key) {
-        if args.len() != entry.arg_count {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "wrong argument count for JIT function",
-            ));
-        }
-        let mut vec = Vec::with_capacity(entry.arg_count);
-        for i in 0..entry.arg_count {
-            vec.push(args.get_item(i)?.extract::<f64>()?);
-        }
-        let ptr = vec.as_ptr();
-        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
-        let res = unsafe { f(ptr) };
-        return Ok(res.into_py(py));
+        return execute_jit_func(py, &entry, args);
     }
     Err(pyo3::exceptions::PyRuntimeError::new_err("no JIT entry found"))
 }

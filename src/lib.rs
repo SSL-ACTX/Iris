@@ -529,7 +529,7 @@ impl Runtime {
     }
 
     /// Bounded variant of spawn_actor_with_budget.
-    pub fn spawn_actor_with_budget_bounded<H, Fut>(&self, handler: H, budget: usize, capacity: usize) -> Pid
+    pub fn spawn_actor_with_budget_bounded<H, Fut>(&self, handler: H, _budget: usize, capacity: usize) -> Pid
     where
         H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,

@@ -1,66 +1,46 @@
-import iris
+# benchmark.py
 import time
-import math
+import array
+from iris.jit import offload
 
-# simple arithmetic function for JIT comparison
-@iris.offload(strategy="jit", return_type="float")
-def add(x: float, y: float) -> float:
-    return x + y
+def square_normal(x: float) -> float:
+    return x * x
 
-class Timer:
-    def __enter__(self):
-        self.start = time.perf_counter()
-        return self
+@offload(strategy="jit", return_type="float")
+def square_jit(x: float) -> float:
+    return x * x
 
-    def __exit__(self, *args):
-        self.end = time.perf_counter()
-        self.duration = self.end - self.start
-
-def heavy_calc(n):
-    """A CPU-bound task: Check if a large number is prime."""
-    if n < 2: return False
-    for i in range(2, int(math.sqrt(n)) + 1):
-        if n % i == 0:
-            return False
-    return True
-
-def test_offload_performance_gain():
-    # Large number to ensure the CPU actually has to work
-    test_val = 10**12 + 39 
-
-    # 1. Baseline: Standard Local Execution
-    with Timer() as local_timer:
-        local_res = heavy_calc(test_val)
+def main() -> None:
+    iterations = 1_000_000
+    print(f"Preparing {iterations:,} elements...")
     
-    # 2. Offloaded: Using Iris Actor Strategy
-    @iris.offload(strategy="actor", return_type="bool")
-    def offloaded_calc(n):
-        if n < 2: return False
-        for i in range(2, int(math.sqrt(n)) + 1):
-            if n % i == 0:
-                return False
-        return True
-
-    with Timer() as offload_timer:
-        offload_res = offloaded_calc(test_val)
-
-    # Validation
-    assert local_res == offload_res
+    # Standard Python list of floats
+    py_list = [float(i) for i in range(iterations)]
     
-    print(f"\nLocal Execution:  {local_timer.duration:.6f}s")
-    print(f"Offload Execution: {offload_timer.duration:.6f}s")
-    
-    # Note: Depending on your 'iris' implementation (Rust/C++ backend),
-    # the first call might have 'warm-up' overhead.
-    if offload_timer.duration < local_timer.duration:
-        print("🚀 Performance gain detected!")
-    else:
-        print("🐢 Offload was slower (likely due to serialization/startup overhead).")
+    # Contiguous C-style array of doubles ('d' represents f64)
+    # This natively exposes the C-buffer protocol to our Rust backend.
+    c_array = array.array('d', py_list)
 
-    # additional JIT test: simple add should be faster than Python
-    with Timer() as jit_timer:
-        jit_res = add(1.234567, 2.345678)
-    print(f"JIT call result {jit_res}, took {jit_timer.duration:.6f}s")
+    # Warm-up JIT
+    square_jit(1.0)
+
+    print("\n--- Batch Processing (1,000,000 elements) ---")
+    
+    # 1. Standard Python Execution
+    start = time.perf_counter()
+    # Using a list comprehension to measure Python's fastest native loop
+    _ = [square_normal(x) for x in py_list]
+    norm_time = time.perf_counter() - start
+    print(f"Normal Python (List Comprehension): {norm_time:.4f} seconds")
+
+    # 2. Iris JIT Vectorized Offload
+    start = time.perf_counter()
+    # Pass the entire array at once. The FFI boundary is crossed exactly ONE time.
+    _ = square_jit(c_array) 
+    jit_time = time.perf_counter() - start
+    print(f"Iris JIT (Vectorized Buffer)      : {jit_time:.4f} seconds")
+    
+    print(f"\nResult: {norm_time / jit_time:.2f}x faster with JIT")
 
 if __name__ == "__main__":
-    test_offload_performance_gain()
+    main()

@@ -7,6 +7,11 @@ wrapper makes it convenient to use from pure Python.
 """
 from __future__ import annotations
 
+import ast
+import functools
+import inspect
+import textwrap
+import warnings
 from typing import Callable, Optional, Any
 
 try:
@@ -17,7 +22,7 @@ except ImportError:  # allow tests to import without extension built
     call_jit = None  # type: ignore
 
 
-def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Callable[[Callable], Callable]:
+def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorator that marks a function for execution on the Iris JIT/actor pool.
 
     The decorated function is returned unchanged; the runtime keeps track of
@@ -30,26 +35,29 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
     ...     return a + b
 
     """
-    def decorator(func: Callable) -> Callable:
-        src = None
-        arg_names = None
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        src: Optional[str] = None
+        arg_names: Optional[list[str]] = None
+
         if strategy == "jit":
             try:
-                import inspect, ast, textwrap
                 src_txt = inspect.getsource(func)
                 src_txt = textwrap.dedent(src_txt)
-                # parse function and grab single return expression
+                
+                # Parse function and find the return expression, skipping docstrings
                 tree = ast.parse(src_txt)
                 for node in tree.body:
                     if isinstance(node, ast.FunctionDef) and node.body:
-                        ret = node.body[0]
-                        if isinstance(ret, ast.Return) and ret.value is not None:
-                            # ast.unparse available in py3.9+
-                            expr = ast.unparse(ret.value)
-                            src = expr
+                        for stmt in node.body:
+                            if isinstance(stmt, ast.Return) and stmt.value is not None:
+                                # ast.unparse available in py3.9+
+                                src = ast.unparse(stmt.value)
+                                break
+                        if src is not None:
                             break
+                            
                 sig = inspect.signature(func)
-                arg_names = [name for name in sig.parameters.keys()]
+                arg_names = list(sig.parameters.keys())
             except Exception:
                 pass
 
@@ -57,18 +65,20 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
             try:
                 register_offload(func, strategy, return_type, src, arg_names)
             except Exception as e:  # pragma: no cover - defensive
-                import warnings
                 warnings.warn(f"offload registration failed: {e}")
 
-        # wrap with runtime call depending on strategy
+        # Wrap with runtime call depending on strategy
         if strategy == "actor" and offload_call is not None:
-            def wrapper(*args: Any, **kwargs: Any) -> Any:
+            @functools.wraps(func)
+            def actor_wrapper(*args: Any, **kwargs: Any) -> Any:
                 return offload_call(func, args, kwargs)
-            return wrapper  # type: ignore
+            return actor_wrapper
+            
         elif strategy == "jit" and call_jit is not None:
-            def wrapper(*args: Any, **kwargs: Any) -> Any:
+            @functools.wraps(func)
+            def jit_wrapper(*args: Any, **kwargs: Any) -> Any:
                 return call_jit(func, args, kwargs)
-            return wrapper  # type: ignore
+            return jit_wrapper
 
         return func
 
