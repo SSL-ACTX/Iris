@@ -105,6 +105,8 @@ enum Expr {
     Const(f64),
     Var(String),
     BinOp(Box<Expr>, char, Box<Expr>),
+    Call(String, Vec<Expr>),
+    UnaryOp(char, Box<Expr>),
 }
 
 // parser helpers
@@ -117,7 +119,7 @@ fn tokenize(expr: &str) -> Vec<String> {
                 tokens.push(cur.clone());
                 cur.clear();
             }
-        } else if "+-*/()".contains(c) {
+        } else if "+-*/(),".contains(c) {
             if !cur.is_empty() {
                 tokens.push(cur.clone());
                 cur.clear();
@@ -194,6 +196,13 @@ impl Parser {
                 self.next(); // consume ')'
                 return expr;
             }
+            if tok == "-" {
+                // unary minus
+                self.next();
+                if let Some(e) = self.parse_factor() {
+                    return Some(Expr::UnaryOp('-', Box::new(e)));
+                }
+            }
         }
         self.parse_primary()
     }
@@ -203,7 +212,29 @@ impl Parser {
             if let Ok(num) = tok.parse::<f64>() {
                 return Some(Expr::Const(num));
             }
-            // identifier
+            // identifier or function call
+            if let Some(peek) = self.peek() {
+                if peek == "(" {
+                    // function call
+                    self.next(); // consume '('
+                    let mut args = Vec::new();
+                    while let Some(p) = self.peek() {
+                        if p == ")" {
+                            self.next();
+                            break;
+                        }
+                        if let Some(expr) = self.parse_expr() {
+                            args.push(expr);
+                        }
+                        if let Some(comma) = self.peek() {
+                            if comma == "," {
+                                self.next();
+                            }
+                        }
+                    }
+                    return Some(Expr::Call(tok, args));
+                }
+            }
             return Some(Expr::Var(tok));
         }
         None
@@ -251,7 +282,7 @@ fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
         fb.switch_to_block(entry);
         fb.seal_block(entry);
         let ptr_val = fb.block_params(entry)[0];
-        let val = gen_expr(&expr, &mut fb, ptr_val, arg_names);
+        let val = gen_expr(&expr, &mut fb, ptr_val, arg_names, &mut module);
         fb.ins().return_(&[val]);
         fb.finalize();
     }
@@ -275,6 +306,7 @@ fn gen_expr(
     fb: &mut FunctionBuilder,
     ptr: Value,
     arg_names: &[String],
+    module: &mut JITModule,
 ) -> Value {
     match expr {
         Expr::Const(n) => fb.ins().f64const(*n),
@@ -286,8 +318,8 @@ fn gen_expr(
             fb.ins().load(types::F64, MemFlags::new(), addr1, 0)
         }
         Expr::BinOp(lhs, op, rhs) => {
-            let l = gen_expr(lhs, fb, ptr, arg_names);
-            let r = gen_expr(rhs, fb, ptr, arg_names);
+            let l = gen_expr(lhs, fb, ptr, arg_names, module);
+            let r = gen_expr(rhs, fb, ptr, arg_names, module);
             match op {
                 '+' => fb.ins().fadd(l, r),
                 '-' => fb.ins().fsub(l, r),
@@ -295,6 +327,38 @@ fn gen_expr(
                 '/' => fb.ins().fdiv(l, r),
                 _ => fb.ins().fadd(l, r),
             }
+        }
+        Expr::UnaryOp(op, sub) => {
+            let v = gen_expr(sub, fb, ptr, arg_names, module);
+            match op {
+                '-' => {
+                    let zero = fb.ins().f64const(0.0);
+                    fb.ins().fsub(zero, v)
+                }
+                '+' => v,
+                _ => v,
+            }
+        }
+        Expr::Call(name, args) => {
+            // evaluate arguments
+            let mut arg_vals = Vec::with_capacity(args.len());
+            for a in args {
+                arg_vals.push(gen_expr(a, fb, ptr, arg_names, module));
+            }
+
+            // All of our external math helpers use f64->f64 or (f64,f64)->f64.
+            // Build a signature accordingly and import the symbol by name.
+            let mut sig = module.make_signature();
+            for _ in 0..arg_vals.len() {
+                sig.params.push(AbiParam::new(types::F64));
+            }
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = module
+                .declare_function(name, Linkage::Import, &sig)
+                .expect("failed to declare external function");
+            let local = module.declare_func_in_func(func_id, &mut fb.func);
+            let call = fb.ins().call(local, &arg_vals);
+            fb.inst_results(call)[0]
         }
     }
 }
@@ -584,5 +648,37 @@ mod tests {
         let isa_builder = cranelift_native::builder().unwrap();
         let isa = isa_builder.finish(settings::Flags::new(flag_builder)).unwrap();
         assert_eq!(isa.flags().is_pic(), !cfg!(target_arch = "aarch64"));
+    }
+
+    #[test]
+    fn compile_jit_math_functions() {
+        let args = vec!["x".to_string()];
+        let entry = compile_jit("sin(x)", &args).expect("should compile sin");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals = [std::f64::consts::PI / 2.0];
+        assert!((f(vals.as_ptr()) - 1.0).abs() < 1e-12);
+
+        let entry2 = compile_jit("cos(x)", &args).expect("should compile cos");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
+        let vals2 = [0.0];
+        assert!((g(vals2.as_ptr()) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn compile_jit_pow_unary() {
+        let args = vec!["a".to_string(), "b".to_string()];
+        let entry = compile_jit("pow(a, b)", &args).expect("should compile pow");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals = [2.0, 3.0];
+        assert_eq!(f(vals.as_ptr()), 8.0);
+    }
+
+    #[test]
+    fn compile_jit_unary_minus() {
+        let args = vec!["x".to_string()];
+        let entry = compile_jit("-x", &args).expect("should compile unary minus");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals = [3.5];
+        assert_eq!(f(vals.as_ptr()), -3.5);
     }
 }

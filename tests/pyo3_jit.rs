@@ -39,11 +39,53 @@ async fn py_jit_offload_decorator_async() {
         // call via jit binding
         let jitcall = module.getattr(py, "call_jit").unwrap();
         let ret2: f64 = jitcall
-            .call1(py, (foo, PyTuple::new(py, &[4.0_f64]), Option::<&PyDict>::None))
+            .call1(py, (foo.clone(), PyTuple::new(py, &[4.0_f64]), Option::<&PyDict>::None))
             .unwrap()
             .extract(py)
             .unwrap();
         assert_eq!(ret2, 8.0);
+
+        // test a few math helpers with JIT
+        py.run("def msin(x): return __import__('math').sin(x)", None, Some(locals)).unwrap();
+        let msin = locals.get_item("msin").unwrap().to_object(py);
+        let decorated_sin: PyObject = register
+            .call1(py, (msin.clone(), Some("jit"), Some("float"),
+                        Some("sin(x)".to_string()), Some(vec!["x".to_string()])))
+            .unwrap();
+        let ret_s: f64 = jitcall
+            .call1(py, (msin, PyTuple::new(py, &[std::f64::consts::PI / 2.0]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert!((ret_s - 1.0).abs() < 1e-12);
+
+        // unary minus
+        py.run("def neg(x): return -x", None, Some(locals)).unwrap();
+        let neg = locals.get_item("neg").unwrap().to_object(py);
+        let decorated_neg: PyObject = register
+            .call1(py, (neg.clone(), Some("jit"), Some("float"),
+                        Some("-x".to_string()), Some(vec!["x".to_string()])))
+            .unwrap();
+        let ret_n: f64 = jitcall
+            .call1(py, (neg, PyTuple::new(py, &[3.0_f64]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(ret_n, -3.0);
+
+        // pow function with two arguments
+        py.run("def mpow(a,b): return __import__('math').pow(a,b)", None, Some(locals)).unwrap();
+        let mpow = locals.get_item("mpow").unwrap().to_object(py);
+        let decorated_pow: PyObject = register
+            .call1(py, (mpow.clone(), Some("jit"), Some("float"),
+                        Some("pow(a,b)".to_string()), Some(vec!["a".to_string(), "b".to_string()])))
+            .unwrap();
+        let ret_p: f64 = jitcall
+            .call1(py, (mpow, PyTuple::new(py, &[2.0_f64, 3.0_f64]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(ret_p, 8.0);
 
         // register a 3-arg function to test zero-copy buffer path
         py.run("def bar(x,y,z): return x+y+z", None, Some(locals)).unwrap();
