@@ -143,6 +143,21 @@ async fn py_jit_offload_decorator_async() {
             .extract(py)
             .unwrap();
         assert_eq!(ret_tern, 1.0);
+
+        // generator/range loop form
+        py.run("def sum_loop(n): return sum(i for i in range(int(n)))", None, Some(locals)).unwrap();
+        let sum_loop = locals.get_item("sum_loop").unwrap().to_object(py);
+        let _ = register
+            .call1(py, (sum_loop.clone(), Some("jit"), Some("float"),
+                        Some("sum(i for i in range(n))".to_string()), Some(vec!["n".to_string()])))
+            .unwrap();
+        let ret_loop: f64 = jitcall
+            .call1(py, (sum_loop, PyTuple::new(py, &[5.0_f64]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(ret_loop, 10.0);
+
         let mexp = locals.get_item("mexp").unwrap().to_object(py);
         let _decorated_exp: PyObject = register
             .call1(py, (mexp.clone(), Some("jit"), Some("float"),

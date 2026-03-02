@@ -59,13 +59,15 @@ The JIT currently understands a modest subset of expressions:
 * numeric literals, variables and the four basic binary ops (`+ - * /`),
   plus floating-point remainder (`%`).
 * unary `-`/`+`
+* loop-style reductions via `sum(expr for i in range(n))` and
+    `sum(expr for i in range(start, end))`.
 * named constants `pi` and `e` are recognised.
 * simple calls to C math library functions — trigonometric (`sin`, `cos`, `tan`),
-  exponentials and logs (`exp`, `log`), roots (`sqrt`), power (`pow`),
-  and the like.  Names may be prefixed (`math.sin`) and the prefix is stripped
-  automatically.  The convenience name `abs` maps to `fabs`.  Any other symbol
-  with a compatible prototype (one or two `float` args returning `float`) will
-  also link through.
+  exponentials and logs (`exp`, `log`), hyperbolics (`sinh`, `cosh`, `tanh`),
+  roots (`sqrt`), power (`pow`), and the like.  Names may be prefixed (`math.sin`)
+  and the prefix is stripped automatically.  The convenience name `abs` maps to
+  `fabs`.  Any other symbol with a compatible prototype (one or two `float` args
+  returning `float`) will also link through.
 
   Arguments are comma-separated.
 
@@ -162,7 +164,9 @@ print(result)  # 3.7416573867739416
 Currently supported JIT expression features include:
 - arithmetic: `+`, `-`, `*`, `/`, `%`, `**`
 - unary operators: `+x`, `-x`
-- math calls: `sin`, `cos`, `tan`, `exp`, `log`, `sqrt`, `pow`, `abs`
+- loop reductions: `sum(expr for i in range(n))`, `sum(expr for i in range(start, end))`
+- math calls: `sin`, `cos`, `tan`, `exp`, `log`, `sqrt`, `pow`, `abs`,
+  `sinh`, `cosh`, `tanh`
 - constants: `pi`, `e`
 - comparisons: `<`, `>`, `<=`, `>=`, `==`, `!=` (returning `1.0` or `0.0`)
 - Python ternary expressions: `a if cond else b`

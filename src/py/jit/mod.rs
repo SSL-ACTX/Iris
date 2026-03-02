@@ -149,6 +149,12 @@ enum Expr {
     Call(String, Vec<Expr>),
     UnaryOp(char, Box<Expr>),
     Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
+    SumFor {
+        iter_var: String,
+        start: Box<Expr>,
+        end: Box<Expr>,
+        body: Box<Expr>,
+    },
 }
 
 // parser helpers
@@ -331,19 +337,75 @@ impl Parser {
                 if peek == "(" {
                     // function call
                     self.next(); // consume '('
+                    if tok == "sum" && !matches!(self.peek(), Some(")")) {
+                        let body_expr = self.parse_expr()?;
+                        if matches!(self.peek(), Some("for")) {
+                            self.next(); // for
+                            let iter_var = self.next()?;
+                            let in_kw = self.next()?;
+                            if in_kw != "in" {
+                                return None;
+                            }
+                            let range_kw = self.next()?;
+                            if range_kw != "range" {
+                                return None;
+                            }
+                            let open = self.next()?;
+                            if open != "(" {
+                                return None;
+                            }
+                            let first = self.parse_expr()?;
+                            let (start, end) = if matches!(self.peek(), Some(",")) {
+                                self.next(); // comma
+                                let second = self.parse_expr()?;
+                                (first, second)
+                            } else {
+                                (Expr::Const(0.0), first)
+                            };
+                            if !matches!(self.peek(), Some(")")) {
+                                return None;
+                            }
+                            self.next(); // inner ')'
+                            if !matches!(self.peek(), Some(")")) {
+                                return None;
+                            }
+                            self.next(); // outer ')'
+                            return Some(Expr::SumFor {
+                                iter_var,
+                                start: Box::new(start),
+                                end: Box::new(end),
+                                body: Box::new(body_expr),
+                            });
+                        } else {
+                            let mut args = vec![body_expr];
+                            while let Some(p) = self.peek() {
+                                if p == ")" {
+                                    self.next();
+                                    break;
+                                }
+                                if p != "," {
+                                    return None;
+                                }
+                                self.next();
+                                if matches!(self.peek(), Some(")")) {
+                                    self.next();
+                                    break;
+                                }
+                                args.push(self.parse_expr()?);
+                            }
+                            return Some(Expr::Call(tok, args));
+                        }
+                    }
+
                     let mut args = Vec::new();
                     while let Some(p) = self.peek() {
                         if p == ")" {
                             self.next();
                             break;
                         }
-                        if let Some(expr) = self.parse_expr() {
-                            args.push(expr);
-                        }
-                        if let Some(comma) = self.peek() {
-                            if comma == "," {
-                                self.next();
-                            }
+                        args.push(self.parse_expr()?);
+                        if matches!(self.peek(), Some(",")) {
+                            self.next();
                         }
                     }
                     return Some(Expr::Call(tok, args));
@@ -383,7 +445,8 @@ fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
             fb.switch_to_block(entry);
             fb.seal_block(entry);
             let ptr_val = fb.block_params(entry)[0];
-            let val = gen_expr(&expr, &mut fb, ptr_val, arg_names, module);
+            let locals = HashMap::new();
+            let val = gen_expr(&expr, &mut fb, ptr_val, arg_names, module, &locals);
             fb.ins().return_(&[val]);
             fb.finalize();
         }
@@ -398,7 +461,10 @@ fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
             return None;
         }
         let id = id.unwrap();
-        module.define_function(id, &mut ctx).ok()?;
+        if let Err(err) = module.define_function(id, &mut ctx) {
+            eprintln!("[Iris][jit] define_function failed: {:?}", err);
+            return None;
+        }
         module.clear_context(&mut ctx);
         module.finalize_definitions();
 
@@ -416,10 +482,14 @@ fn gen_expr(
     ptr: Value,
     arg_names: &[String],
     module: &mut JITModule,
+    locals: &HashMap<String, Value>,
 ) -> Value {
     match expr {
         Expr::Const(n) => fb.ins().f64const(*n),
         Expr::Var(name) => {
+            if let Some(v) = locals.get(name) {
+                return *v;
+            }
             // treat named constants
             match name.as_str() {
                 "pi" => return fb.ins().f64const(std::f64::consts::PI),
@@ -433,8 +503,8 @@ fn gen_expr(
             fb.ins().load(types::F64, MemFlags::new(), addr1, 0)
         }
         Expr::BinOp(lhs, op, rhs) => {
-            let l = gen_expr(lhs, fb, ptr, arg_names, module);
-            let r = gen_expr(rhs, fb, ptr, arg_names, module);
+            let l = gen_expr(lhs, fb, ptr, arg_names, module, locals);
+            let r = gen_expr(rhs, fb, ptr, arg_names, module, locals);
             match op.as_str() {
                 "+" => fb.ins().fadd(l, r),
                 "-" => fb.ins().fsub(l, r),
@@ -533,7 +603,7 @@ fn gen_expr(
             }
         }
         Expr::UnaryOp(op, sub) => {
-            let v = gen_expr(sub, fb, ptr, arg_names, module);
+            let v = gen_expr(sub, fb, ptr, arg_names, module, locals);
             match op {
                 '-' => {
                     let zero = fb.ins().f64const(0.0);
@@ -547,7 +617,7 @@ fn gen_expr(
             // evaluate arguments
             let mut arg_vals = Vec::with_capacity(args.len());
             for a in args {
-                arg_vals.push(gen_expr(a, fb, ptr, arg_names, module));
+                arg_vals.push(gen_expr(a, fb, ptr, arg_names, module, locals));
             }
 
             // strip module prefixes (e.g. math.sin -> sin)
@@ -572,15 +642,58 @@ fn gen_expr(
         }
         Expr::Ternary(cond, then_expr, else_expr) => {
             // evaluate condition and produce a boolean
-            let cond_val = gen_expr(cond, fb, ptr, arg_names, module);
+            let cond_val = gen_expr(cond, fb, ptr, arg_names, module, locals);
             let zero = fb.ins().f64const(0.0);
             // any nonzero float is truthy
             let cond_bool = fb.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
 
-            let then_val = gen_expr(then_expr, fb, ptr, arg_names, module);
-            let else_val = gen_expr(else_expr, fb, ptr, arg_names, module);
+            let then_val = gen_expr(then_expr, fb, ptr, arg_names, module, locals);
+            let else_val = gen_expr(else_expr, fb, ptr, arg_names, module, locals);
             // select uses a B1 condition directly
             fb.ins().select(cond_bool, then_val, else_val)
+        }
+        Expr::SumFor {
+            iter_var,
+            start,
+            end,
+            body,
+        } => {
+            let start_val = gen_expr(start, fb, ptr, arg_names, module, locals);
+            let end_val = gen_expr(end, fb, ptr, arg_names, module, locals);
+            let zero_acc = fb.ins().f64const(0.0);
+
+            let loop_block = fb.create_block();
+            let body_block = fb.create_block();
+            let exit_block = fb.create_block();
+
+            fb.append_block_param(loop_block, types::F64); // i
+            fb.append_block_param(loop_block, types::F64); // acc
+            fb.append_block_param(exit_block, types::F64); // result
+
+            fb.ins().jump(loop_block, &[start_val, zero_acc]);
+
+            fb.switch_to_block(loop_block);
+            let i_val = fb.block_params(loop_block)[0];
+            let acc_val = fb.block_params(loop_block)[1];
+            let cond = fb.ins().fcmp(FloatCC::LessThan, i_val, end_val);
+            fb.ins().brnz(cond, body_block, &[]);
+            fb.ins().jump(exit_block, &[acc_val]);
+
+            fb.switch_to_block(body_block);
+            let mut body_locals = locals.clone();
+            body_locals.insert(iter_var.clone(), i_val);
+            let body_val = gen_expr(body, fb, ptr, arg_names, module, &body_locals);
+            let next_acc = fb.ins().fadd(acc_val, body_val);
+            let one = fb.ins().f64const(1.0);
+            let next_i = fb.ins().fadd(i_val, one);
+            fb.ins().jump(loop_block, &[next_i, next_acc]);
+
+            fb.seal_block(body_block);
+            fb.seal_block(loop_block);
+
+            fb.switch_to_block(exit_block);
+            fb.seal_block(exit_block);
+            fb.block_params(exit_block)[0]
         }
     }
 }
@@ -886,6 +999,22 @@ mod tests {
         let vals2 = [0.0];
         assert!((g(vals2.as_ptr()) - 1.0).abs() < 1e-12);
 
+        // hyperbolics
+        let entryh = compile_jit("sinh(x)", &args).expect("should compile sinh");
+        let sh: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entryh.func_ptr) };
+        let vsh = [1.0];
+        assert!((sh(vsh.as_ptr()) - vsh[0].sinh()).abs() < 1e-12);
+
+        let entryh2 = compile_jit("cosh(x)", &args).expect("should compile cosh");
+        let ch: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entryh2.func_ptr) };
+        let vch = [0.0];
+        assert!((ch(vch.as_ptr()) - vch[0].cosh()).abs() < 1e-12);
+
+        let entryh3 = compile_jit("tanh(x)", &args).expect("should compile tanh");
+        let th: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entryh3.func_ptr) };
+        let vth = [0.0];
+        assert!((th(vth.as_ptr()) - vth[0].tanh()).abs() < 1e-12);
+
         // exponentials / logs
         let entry3 = compile_jit("exp(x)", &args).expect("should compile exp");
         let h: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry3.func_ptr) };
@@ -1038,5 +1167,23 @@ mod tests {
         let h: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
         let vals2 = [-4.0];
         assert_eq!(h(vals2.as_ptr()), 4.0);
+    }
+
+    #[test]
+    fn compile_jit_sum_range_loop() {
+        let args = vec!["n".to_string()];
+        let entry = compile_jit("sum(i for i in range(n))", &args).expect("sum range loop");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals = [5.0];
+        assert_eq!(f(vals.as_ptr()), 10.0);
+    }
+
+    #[test]
+    fn compile_jit_sum_range_loop_with_body_expr() {
+        let args = vec!["x".to_string(), "n".to_string()];
+        let entry = compile_jit("sum(i * x for i in range(n))", &args).expect("sum range with body expr");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals = [2.0, 4.0];
+        assert_eq!(f(vals.as_ptr()), 12.0);
     }
 }
