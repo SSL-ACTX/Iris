@@ -48,7 +48,7 @@ async fn py_jit_offload_decorator_async() {
         // test a few math helpers with JIT
         py.run("def msin(x): return __import__('math').sin(x)", None, Some(locals)).unwrap();
         let msin = locals.get_item("msin").unwrap().to_object(py);
-        let decorated_sin: PyObject = register
+        let _decorated_sin: PyObject = register
             .call1(py, (msin.clone(), Some("jit"), Some("float"),
                         Some("sin(x)".to_string()), Some(vec!["x".to_string()])))
             .unwrap();
@@ -62,7 +62,7 @@ async fn py_jit_offload_decorator_async() {
         // unary minus
         py.run("def neg(x): return -x", None, Some(locals)).unwrap();
         let neg = locals.get_item("neg").unwrap().to_object(py);
-        let decorated_neg: PyObject = register
+        let _decorated_neg: PyObject = register
             .call1(py, (neg.clone(), Some("jit"), Some("float"),
                         Some("-x".to_string()), Some(vec!["x".to_string()])))
             .unwrap();
@@ -76,7 +76,7 @@ async fn py_jit_offload_decorator_async() {
         // pow function with two arguments
         py.run("def mpow(a,b): return __import__('math').pow(a,b)", None, Some(locals)).unwrap();
         let mpow = locals.get_item("mpow").unwrap().to_object(py);
-        let decorated_pow: PyObject = register
+        let _decorated_pow: PyObject = register
             .call1(py, (mpow.clone(), Some("jit"), Some("float"),
                         Some("pow(a,b)".to_string()), Some(vec!["a".to_string(), "b".to_string()])))
             .unwrap();
@@ -86,6 +86,86 @@ async fn py_jit_offload_decorator_async() {
             .extract(py)
             .unwrap();
         assert_eq!(ret_p, 8.0);
+
+        // exponent operator **
+        py.run("def expop(): return 2 ** 3", None, Some(locals)).unwrap();
+        let expop = locals.get_item("expop").unwrap().to_object(py);
+        let _ = register
+            .call1(py, (expop.clone(), Some("jit"), Some("float"),
+                        Some("2 ** 3".to_string()), Some(Vec::<String>::new())))
+            .unwrap();
+        let ret_ex: f64 = jitcall
+            .call1(py, (expop, PyTuple::empty(py), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(ret_ex, 8.0);
+
+        py.run("def expassoc(): return 2 ** 3 ** 2", None, Some(locals)).unwrap();
+        let expassoc = locals.get_item("expassoc").unwrap().to_object(py);
+        let _ = register
+            .call1(py, (expassoc.clone(), Some("jit"), Some("float"),
+                        Some("2 ** 3 ** 2".to_string()), Some(Vec::<String>::new())))
+            .unwrap();
+        let ret_ea: f64 = jitcall
+            .call1(py, (expassoc, PyTuple::empty(py), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(ret_ea, 512.0);
+
+        // additional math helpers
+        py.run("def mexp(x): return __import__('math').exp(x)", None, Some(locals)).unwrap();
+        let mexp = locals.get_item("mexp").unwrap().to_object(py);
+        let _decorated_exp: PyObject = register
+            .call1(py, (mexp.clone(), Some("jit"), Some("float"),
+                        Some("exp(x)".to_string()), Some(vec!["x".to_string()])))
+            .unwrap();
+        let ret_e: f64 = jitcall
+            .call1(py, (mexp, PyTuple::new(py, &[1.0_f64]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert!((ret_e - std::f64::consts::E).abs() < 1e-12);
+
+        py.run("def mlog(x): return __import__('math').log(x)", None, Some(locals)).unwrap();
+        let mlog = locals.get_item("mlog").unwrap().to_object(py);
+        let _decorated_log: PyObject = register
+            .call1(py, (mlog.clone(), Some("jit"), Some("float"),
+                        Some("log(x)".to_string()), Some(vec!["x".to_string()])))
+            .unwrap();
+        let ret_l: f64 = jitcall
+            .call1(py, (mlog, PyTuple::new(py, &[std::f64::consts::E]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert!((ret_l - 1.0).abs() < 1e-12);
+
+        py.run("def msqrt(x): return __import__('math').sqrt(x)", None, Some(locals)).unwrap();
+        let msqrt = locals.get_item("msqrt").unwrap().to_object(py);
+        let _decorated_sqrt: PyObject = register
+            .call1(py, (msqrt.clone(), Some("jit"), Some("float"),
+                        Some("sqrt(x)".to_string()), Some(vec!["x".to_string()])))
+            .unwrap();
+        let ret_sqrt: f64 = jitcall
+            .call1(py, (msqrt, PyTuple::new(py, &[16.0_f64]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert!((ret_sqrt - 4.0).abs() < 1e-12);
+
+        py.run("def mtan(x): return __import__('math').tan(x)", None, Some(locals)).unwrap();
+        let mtan = locals.get_item("mtan").unwrap().to_object(py);
+        let _decorated_tan: PyObject = register
+            .call1(py, (mtan.clone(), Some("jit"), Some("float"),
+                        Some("tan(x)".to_string()), Some(vec!["x".to_string()])))
+            .unwrap();
+        let ret_tan: f64 = jitcall
+            .call1(py, (mtan, PyTuple::new(py, &[0.0_f64]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert!((ret_tan - 0.0).abs() < 1e-12);
 
         // register a 3-arg function to test zero-copy buffer path
         py.run("def bar(x,y,z): return x+y+z", None, Some(locals)).unwrap();
@@ -99,6 +179,61 @@ async fn py_jit_offload_decorator_async() {
                 Some(vec!["x".to_string(), "y".to_string(), "z".to_string()]),
             ))
             .unwrap();
+
+        // modulo and constants
+        py.run("def mod(a,b): return a % b", None, Some(locals)).unwrap();
+        let md = locals.get_item("mod").unwrap().to_object(py);
+        let _decorated_mod: PyObject = register
+            .call1(py, (md.clone(), Some("jit"), Some("float"),
+                        Some("a % b".to_string()), Some(vec!["a".to_string(), "b".to_string()])))
+            .unwrap();
+        let ret_mod: f64 = jitcall
+            .call1(py, (md, PyTuple::new(py, &[5.0_f64, 2.0_f64]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(ret_mod, 1.0);
+
+        // pi and e constants
+        py.run("def consts(): return pi + e", None, Some(locals)).unwrap();
+        let consts = locals.get_item("consts").unwrap().to_object(py);
+        let _decorated_consts: PyObject = register
+            .call1(py, (consts.clone(), Some("jit"), Some("float"),
+                        Some("pi+e".to_string()), Some(Vec::<String>::new())))
+            .unwrap();
+        let ret_c: f64 = jitcall
+            .call1(py, (consts, PyTuple::empty(py), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert!((ret_c - (std::f64::consts::PI + std::f64::consts::E)).abs() < 1e-12);
+
+        // dotted and abs simpler examples
+        py.run("def dsin(x): return math.sin(x)", None, Some(locals)).unwrap();
+        let dsin = locals.get_item("dsin").unwrap().to_object(py);
+        let _ = register
+            .call1(py, (dsin.clone(), Some("jit"), Some("float"),
+                        Some("math.sin(x)".to_string()), Some(vec!["x".to_string()])))
+            .unwrap();
+        let ret_ds: f64 = jitcall
+            .call1(py, (dsin, PyTuple::new(py, &[std::f64::consts::PI/2.0]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert!((ret_ds - 1.0).abs() < 1e-12);
+
+        py.run("def fabs(x): return abs(x)", None, Some(locals)).unwrap();
+        let fabsf = locals.get_item("fabs").unwrap().to_object(py);
+        let _ = register
+            .call1(py, (fabsf.clone(), Some("jit"), Some("float"),
+                        Some("abs(x)".to_string()), Some(vec!["x".to_string()])))
+            .unwrap();
+        let ret_ab: f64 = jitcall
+            .call1(py, (fabsf, PyTuple::new(py, &[-4.0_f64]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(ret_ab, 4.0);
         assert!(decorated3.as_ref(py).is_callable());
         // build a buffer of three doubles
         py.run("from array import array\nbuf = array('d', [1.0, 2.0, 3.0])", None, Some(locals)).unwrap();

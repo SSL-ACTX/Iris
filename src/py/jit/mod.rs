@@ -104,7 +104,7 @@ fn lookup_jit(func_key: usize) -> Option<JitEntry> {
 enum Expr {
     Const(f64),
     Var(String),
-    BinOp(Box<Expr>, char, Box<Expr>),
+    BinOp(Box<Expr>, String, Box<Expr>),
     Call(String, Vec<Expr>),
     UnaryOp(char, Box<Expr>),
 }
@@ -113,21 +113,34 @@ enum Expr {
 fn tokenize(expr: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut cur = String::new();
-    for c in expr.chars() {
+    let mut chars = expr.chars().peekable();
+    while let Some(c) = chars.next() {
         if c.is_whitespace() {
             if !cur.is_empty() {
                 tokens.push(cur.clone());
                 cur.clear();
             }
-        } else if "+-*/(),".contains(c) {
+            continue;
+        }
+        // handle two-character operator **
+        if c == '*' && chars.peek() == Some(&'*') {
+            if !cur.is_empty() {
+                tokens.push(cur.clone());
+                cur.clear();
+            }
+            chars.next();
+            tokens.push("**".to_string());
+            continue;
+        }
+        if "+-*/(),%".contains(c) {
             if !cur.is_empty() {
                 tokens.push(cur.clone());
                 cur.clear();
             }
             tokens.push(c.to_string());
-        } else {
-            cur.push(c);
+            continue;
         }
+        cur.push(c);
     }
     if !cur.is_empty() {
         tokens.push(cur);
@@ -135,7 +148,7 @@ fn tokenize(expr: &str) -> Vec<String> {
     tokens
 }
 
-// Pratt parser implementation
+// Pratt parser implementation with exponent precedence
 struct Parser {
     tokens: Vec<String>,
     pos: usize,
@@ -164,9 +177,9 @@ impl Parser {
         let mut node = self.parse_term()?;
         while let Some(op) = self.peek() {
             if op == "+" || op == "-" {
-                let op = self.next().unwrap().chars().next().unwrap();
+                let op_str = self.next().unwrap();
                 let rhs = self.parse_term()?;
-                node = Expr::BinOp(Box::new(node), op, Box::new(rhs));
+                node = Expr::BinOp(Box::new(node), op_str, Box::new(rhs));
                 continue;
             }
             break;
@@ -175,12 +188,26 @@ impl Parser {
     }
 
     fn parse_term(&mut self) -> Option<Expr> {
+        let mut node = self.parse_power()?;
+        while let Some(op) = self.peek() {
+            if op == "*" || op == "/" || op == "%" {
+                let op_str = self.next().unwrap();
+                let rhs = self.parse_power()?;
+                node = Expr::BinOp(Box::new(node), op_str, Box::new(rhs));
+                continue;
+            }
+            break;
+        }
+        Some(node)
+    }
+
+    fn parse_power(&mut self) -> Option<Expr> {
         let mut node = self.parse_factor()?;
         while let Some(op) = self.peek() {
-            if op == "*" || op == "/" {
-                let op = self.next().unwrap().chars().next().unwrap();
-                let rhs = self.parse_factor()?;
-                node = Expr::BinOp(Box::new(node), op, Box::new(rhs));
+            if op == "**" {
+                self.next();
+                let rhs = self.parse_power()?; // right-associative
+                node = Expr::BinOp(Box::new(node), "**".to_string(), Box::new(rhs));
                 continue;
             }
             break;
@@ -311,6 +338,12 @@ fn gen_expr(
     match expr {
         Expr::Const(n) => fb.ins().f64const(*n),
         Expr::Var(name) => {
+            // treat named constants
+            match name.as_str() {
+                "pi" => return fb.ins().f64const(std::f64::consts::PI),
+                "e" => return fb.ins().f64const(std::f64::consts::E),
+                _ => {}
+            }
             let idx = arg_names.iter().position(|n| n == name).unwrap_or(0);
             let offset = (idx as i64) * 8;
             let offset_const = fb.ins().iconst(types::I64, offset);
@@ -320,11 +353,65 @@ fn gen_expr(
         Expr::BinOp(lhs, op, rhs) => {
             let l = gen_expr(lhs, fb, ptr, arg_names, module);
             let r = gen_expr(rhs, fb, ptr, arg_names, module);
-            match op {
-                '+' => fb.ins().fadd(l, r),
-                '-' => fb.ins().fsub(l, r),
-                '*' => fb.ins().fmul(l, r),
-                '/' => fb.ins().fdiv(l, r),
+            match op.as_str() {
+                "+" => fb.ins().fadd(l, r),
+                "-" => fb.ins().fsub(l, r),
+                "*" => fb.ins().fmul(l, r),
+                "/" => fb.ins().fdiv(l, r),
+                "%" => {
+                    let mut sig = module.make_signature();
+                    sig.params.push(AbiParam::new(types::F64));
+                    sig.params.push(AbiParam::new(types::F64));
+                    sig.returns.push(AbiParam::new(types::F64));
+                    let fid = module
+                        .declare_function("fmod", Linkage::Import, &sig)
+                        .expect("failed to declare fmod");
+                    let local = module.declare_func_in_func(fid, &mut fb.func);
+                    let call = fb.ins().call(local, &[l, r]);
+                    fb.inst_results(call)[0]
+                }
+                "**" => {
+                    // if exponent is a floating‑point constant that is actually
+                    // an integer, we can generate multiplications directly using
+                    // exponentiation by squaring.  This avoids the overhead of a
+                    // `pow` call for common small exponents.  Negative integers
+                    // are *not* optimized to avoid introducing divide-by-zero
+                    // behaviour; they fall through to `pow`.
+                    if let Expr::Const(n) = **rhs {
+                        if n.fract() == 0.0 {
+                            let exp = n as i64;
+                            if exp == 0 {
+                                return fb.ins().f64const(1.0);
+                            } else if exp > 0 {
+                                // squaring loop
+                                let mut e = exp as u64;
+                                let mut base_val = l;
+                                let mut acc = fb.ins().f64const(1.0);
+                                while e > 0 {
+                                    if e & 1 == 1 {
+                                        acc = fb.ins().fmul(acc, base_val);
+                                    }
+                                    e >>= 1;
+                                    if e > 0 {
+                                        base_val = fb.ins().fmul(base_val, base_val);
+                                    }
+                                }
+                                return acc;
+                            }
+                        }
+                    }
+                    // fallback: call native pow
+                    let mut sig = module.make_signature();
+                    sig.params.push(AbiParam::new(types::F64));
+                    sig.params.push(AbiParam::new(types::F64));
+                    sig.returns.push(AbiParam::new(types::F64));
+                    let fid = module
+                        .declare_function("pow", Linkage::Import, &sig)
+                        .expect("failed to declare pow");
+                    let local = module.declare_func_in_func(fid, &mut fb.func);
+                    let call = fb.ins().call(local, &[l, r]);
+                    fb.inst_results(call)[0]
+                }
                 _ => fb.ins().fadd(l, r),
             }
         }
@@ -346,15 +433,21 @@ fn gen_expr(
                 arg_vals.push(gen_expr(a, fb, ptr, arg_names, module));
             }
 
-            // All of our external math helpers use f64->f64 or (f64,f64)->f64.
-            // Build a signature accordingly and import the symbol by name.
+            // strip module prefixes (e.g. math.sin -> sin)
+            let mut symbol = name.rsplit('.').next().unwrap().to_string();
+            // map certain Python convenience names to C counterparts
+            if symbol == "abs" {
+                symbol = "fabs".to_string();
+            }
+
+            // Build signature and import
             let mut sig = module.make_signature();
             for _ in 0..arg_vals.len() {
                 sig.params.push(AbiParam::new(types::F64));
             }
             sig.returns.push(AbiParam::new(types::F64));
             let func_id = module
-                .declare_function(name, Linkage::Import, &sig)
+                .declare_function(&symbol, Linkage::Import, &sig)
                 .expect("failed to declare external function");
             let local = module.declare_func_in_func(func_id, &mut fb.func);
             let call = fb.ins().call(local, &arg_vals);
@@ -653,6 +746,7 @@ mod tests {
     #[test]
     fn compile_jit_math_functions() {
         let args = vec!["x".to_string()];
+        // trigonometry
         let entry = compile_jit("sin(x)", &args).expect("should compile sin");
         let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
         let vals = [std::f64::consts::PI / 2.0];
@@ -662,6 +756,28 @@ mod tests {
         let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
         let vals2 = [0.0];
         assert!((g(vals2.as_ptr()) - 1.0).abs() < 1e-12);
+
+        // exponentials / logs
+        let entry3 = compile_jit("exp(x)", &args).expect("should compile exp");
+        let h: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry3.func_ptr) };
+        let vals3 = [1.0];
+        assert!((h(vals3.as_ptr()) - std::f64::consts::E).abs() < 1e-12);
+
+        let entry4 = compile_jit("log(x)", &args).expect("should compile log");
+        let k: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry4.func_ptr) };
+        let vals4 = [std::f64::consts::E];
+        assert!((k(vals4.as_ptr()) - 1.0).abs() < 1e-12);
+
+        // square root and tangent
+        let entry5 = compile_jit("sqrt(x)", &args).expect("should compile sqrt");
+        let s: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry5.func_ptr) };
+        let vals5 = [16.0];
+        assert!((s(vals5.as_ptr()) - 4.0).abs() < 1e-12);
+
+        let entry6 = compile_jit("tan(x)", &args).expect("should compile tan");
+        let t: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry6.func_ptr) };
+        let vals6 = [0.0];
+        assert!((t(vals6.as_ptr()) - 0.0).abs() < 1e-12);
     }
 
     #[test]
@@ -680,5 +796,59 @@ mod tests {
         let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
         let vals = [3.5];
         assert_eq!(f(vals.as_ptr()), -3.5);
+    }
+
+    #[test]
+    fn compile_jit_constants_and_mod() {
+        let args = vec!["a".to_string(), "b".to_string()];
+        let entry = compile_jit("a % b", &args).expect("should handle mod");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals = [5.0, 2.0];
+        assert_eq!(f(vals.as_ptr()), 1.0);
+
+        // constant names
+        let entry2 = compile_jit("pi + e", &[]).expect("consts");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
+        let empty: [f64; 0] = [];
+        assert!((g(empty.as_ptr()) - (std::f64::consts::PI + std::f64::consts::E)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn compile_jit_power_op() {
+        // simple power
+        let args = vec!["x".to_string()];
+        let entry = compile_jit("2 ** 3", &[]).expect("const power");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let empty: [f64; 0] = [];
+        assert_eq!(f(empty.as_ptr()), 8.0);
+
+        // right-associative
+        let entry2 = compile_jit("2 ** 3 ** 2", &[]).expect("assoc");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
+        assert_eq!(g(empty.as_ptr()), 512.0); // 2^(3^2)
+
+        // strength reduction path should handle small integer exponents
+        let entry3 = compile_jit("5 ** 4", &[]).expect("strength");
+        let h: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry3.func_ptr) };
+        assert_eq!(h(empty.as_ptr()), 625.0);
+
+        // negative constants still use pow (result should be correct)
+        let entry4 = compile_jit("2 ** -2", &[]).expect("neg exp");
+        let k: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry4.func_ptr) };
+        assert!((k(empty.as_ptr()) - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn compile_jit_dotted_and_abs() {
+        let args = vec!["x".to_string()];
+        let entry = compile_jit("math.sin(x)", &args).expect("dotted sin");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals = [std::f64::consts::PI / 2.0];
+        assert!((f(vals.as_ptr()) - 1.0).abs() < 1e-12);
+
+        let entry2 = compile_jit("abs(x)", &args).expect("abs maps to fabs");
+        let h: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
+        let vals2 = [-4.0];
+        assert_eq!(h(vals2.as_ptr()), 4.0);
     }
 }

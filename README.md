@@ -56,11 +56,18 @@ Built-in fault tolerance modeled after the "Let it Crash" philosophy.
 ### 🧠 Experimental JIT / Compute Offload
 A new Python decorator (`@iris.offload`) lets you mark pure‑math or CPU‑bound functions for execution outside the interpreter. Under the hood the runtime either compiles the function to native code via Cranelift or routes calls to a dedicated Rust actor pool, bypassing the GIL and dramatically speeding up hot paths. This feature is still alpha and may change.
 The JIT currently understands a modest subset of expressions:
-* numeric literals, variables and the four basic binary ops (`+ - * /`)
+* numeric literals, variables and the four basic binary ops (`+ - * /`),
+  plus floating-point remainder (`%`).
 * unary `-`/`+`
-* simple calls to C math library functions (`sin`, `cos`, `exp`, `log`, `pow`, etc.)
-  — any symbol taking one or two `float` arguments and returning `float` works.
-  Argument lists are separated by commas.
+* named constants `pi` and `e` are recognised.
+* simple calls to C math library functions — trigonometric (`sin`, `cos`, `tan`),
+  exponentials and logs (`exp`, `log`), roots (`sqrt`), power (`pow`),
+  and the like.  Names may be prefixed (`math.sin`) and the prefix is stripped
+  automatically.  The convenience name `abs` maps to `fabs`.  Any other symbol
+  with a compatible prototype (one or two `float` args returning `float`) will
+  also link through.
+
+  Arguments are comma-separated.
 > **Note:** Cranelift’s JIT backend historically relied on x86_64‑only PLT support. When running on
 > aarch64 hardware, the runtime automatically disables PIC mode to avoid PLT relocation
 > generation; offloaded functions still execute correctly but are not position‑independent.

@@ -76,7 +76,18 @@ Instead of dynamic compilation, we leverage Iris's existing actor primitives to 
 
 **Phase 2: The JIT Prototype**
 
-1. Define the restricted subset of Python AST that the JIT will support (e.g., `BinaryOp`, `UnaryOp`, `Assign`, `Return`). Type hinting will be mandatory for JIT parsing.
+1. Define the restricted subset of Python AST that the JIT will support (e.g., `BinaryOp`, `UnaryOp`, `Assign`, `Return`).  Initially this will include:
+   * numeric literals and variables
+   * binary ops `+ - * /` and `%`
+   * unary `+`/`-`
+   * exponentiation `**` (compiled to `pow` or strength‑reduced when the
+     exponent is a small integer)
+   * simple function calls with one or two `float` arguments (e.g. `sin(x)`, `pow(a,b)`),
+     allowing an optional module prefix such as `math.sin`.
+   * named constants `pi` and `e`.
+   * automatic remapping of Python convenience names such as `abs` → `fabs`.
+
+   Type hinting will be mandatory for JIT parsing.
 2. Integrate a Cranelift backend into the Iris Rust crate.
 3. Map Python AST nodes to Cranelift IR.
 
