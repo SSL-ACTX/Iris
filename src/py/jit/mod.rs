@@ -19,6 +19,7 @@ use pyo3::types::{PyDict, PyTuple, PyBytes};
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
+use cranelift_native;
 use pyo3::AsPyPointer;
 
 // Offload actor pool ---------------------------------------------------------
@@ -218,7 +219,25 @@ fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
     let arg_count = arg_names.len();
 
     // create a new JIT module for each compilation (avoids sync issues)
-    let builder = JITBuilder::new(cranelift_module::default_libcall_names()).expect("failed to create JITBuilder");
+    // On aarch64 we avoid PIC so that cranelift-jit does not try to emit
+    // PLT entries (the backend currently panics with an assert when PLT
+    // generation is attempted).  Disabling PIC is safe for the few small
+    // functions we emit because the module is only used locally and we
+    // never relocate the code.
+    let mut flag_builder = settings::builder();
+    flag_builder.set("use_colocated_libcalls", "false").unwrap();
+    if cfg!(target_arch = "aarch64") {
+        flag_builder.set("is_pic", "false").unwrap();
+    } else {
+        flag_builder.set("is_pic", "true").unwrap();
+    }
+    let isa_builder = cranelift_native::builder().unwrap_or_else(|msg| {
+        panic!("host machine is not supported: {}", msg);
+    });
+    let isa = isa_builder
+        .finish(settings::Flags::new(flag_builder))
+        .expect("failed to create ISA");
+    let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     let mut module = JITModule::new(builder);
     let mut ctx = module.make_context();
     ctx.func.signature.params.push(AbiParam::new(types::I64));
@@ -535,4 +554,35 @@ fn call_jit(
         return execute_jit_func(py, &entry, args);
     }
     Err(pyo3::exceptions::PyRuntimeError::new_err("no JIT entry found"))
+}
+
+// ------- tests ------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compile_jit_basic_math() {
+        let args = vec!["a".to_string(), "b".to_string()];
+        let entry = compile_jit("a + b", &args).expect("should compile");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let values = [1.5, 2.5];
+        let result = f(values.as_ptr());
+        assert_eq!(result, 4.0);
+    }
+
+    #[test]
+    fn jit_builder_pic_flag_behavior() {
+        let mut flag_builder = settings::builder();
+        flag_builder.set("use_colocated_libcalls", "false").unwrap();
+        if cfg!(target_arch = "aarch64") {
+            flag_builder.set("is_pic", "false").unwrap();
+        } else {
+            flag_builder.set("is_pic", "true").unwrap();
+        }
+        let isa_builder = cranelift_native::builder().unwrap();
+        let isa = isa_builder.finish(settings::Flags::new(flag_builder)).unwrap();
+        assert_eq!(isa.flags().is_pic(), !cfg!(target_arch = "aarch64"));
+    }
 }

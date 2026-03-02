@@ -80,6 +80,13 @@ Instead of dynamic compilation, we leverage Iris's existing actor primitives to 
 2. Integrate a Cranelift backend into the Iris Rust crate.
 3. Map Python AST nodes to Cranelift IR.
 
+> **Note:** Cranelift's JIT backend currently only implements PLT (procedure linkage table)
+> support on **x86_64**. When running the offload/JIT features on other architectures such
+> as **aarch64**, the runtime disables PIC mode and avoids emitting PLT entries. This
+> workaround prevents runtime panics and is transparent to Python users, but limits
+> position‑independence for JIT code on non‑x86 hosts. Expect future upstream Cranelift
+> releases to add full PLT support on additional architectures.
+
 **Phase 3: Fallback Mechanisms**
 
 1. Implement automatic fallback. If the JIT parser encounters an unsupported Python construct (like an external library call or I/O), it silently falls back to standard Python execution and logs a warning.
