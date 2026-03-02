@@ -82,6 +82,8 @@ Instead of dynamic compilation, we leverage Iris's existing actor primitives to 
    * unary `+`/`-`
    * exponentiation `**` (compiled to `pow` or strength‑reduced when the
      exponent is a small integer)
+   * comparison operators (`<`, `>`, `<=`, `>=`, `==`, `!=`) returning `1.0`/`0.0`
+   * Python ternary `x if cond else y` with the standard semantics
    * simple function calls with one or two `float` arguments (e.g. `sin(x)`, `pow(a,b)`),
      allowing an optional module prefix such as `math.sin`.
    * named constants `pi` and `e`.

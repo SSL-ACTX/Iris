@@ -87,6 +87,47 @@ struct JitEntry {
 static JIT_REGISTRY: once_cell::sync::OnceCell<Mutex<HashMap<usize, JitEntry>>> =
     once_cell::sync::OnceCell::new();
 
+// Each thread gets its own JITModule instance.  This sidesteps the
+// `Sync` requirements that prevented us from keeping a single global
+// module in a `static`, and it still guarantees that the first
+// compilation on a given thread will reserve the address space for all
+// later functions.  Since the module is stored in thread-local storage
+// it will live for the duration of the thread (i.e. the lifetime of the
+// Python interpreter thread used during tests).
+thread_local! {
+    static TLS_JIT_MODULE: std::cell::RefCell<Option<JITModule>> =
+        std::cell::RefCell::new(None);
+}
+
+fn with_jit_module<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut JITModule) -> R,
+{
+    TLS_JIT_MODULE.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        if opt.is_none() {
+            // lazily construct the module the first time for this thread
+            let mut flag_builder = settings::builder();
+            flag_builder.set("use_colocated_libcalls", "false").unwrap();
+            if cfg!(target_arch = "aarch64") {
+                flag_builder.set("is_pic", "false").unwrap();
+            } else {
+                flag_builder.set("is_pic", "true").unwrap();
+            }
+            let isa_builder = cranelift_native::builder().unwrap_or_else(|msg| {
+                panic!("host machine is not supported: {}", msg);
+            });
+            let isa = isa_builder
+                .finish(settings::Flags::new(flag_builder))
+                .expect("failed to create ISA");
+            let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+            *opt = Some(JITModule::new(builder));
+        }
+        let module = opt.as_mut().unwrap();
+        f(module)
+    })
+}
+
 fn register_jit(func_key: usize, entry: JitEntry) {
     let map = JIT_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = map.lock().unwrap();
@@ -107,6 +148,7 @@ enum Expr {
     BinOp(Box<Expr>, String, Box<Expr>),
     Call(String, Vec<Expr>),
     UnaryOp(char, Box<Expr>),
+    Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
 }
 
 // parser helpers
@@ -122,7 +164,7 @@ fn tokenize(expr: &str) -> Vec<String> {
             }
             continue;
         }
-        // handle two-character operator **
+        // handle two-character operators
         if c == '*' && chars.peek() == Some(&'*') {
             if !cur.is_empty() {
                 tokens.push(cur.clone());
@@ -132,7 +174,18 @@ fn tokenize(expr: &str) -> Vec<String> {
             tokens.push("**".to_string());
             continue;
         }
-        if "+-*/(),%".contains(c) {
+        if (c == '<' || c == '>' || c == '=' || c == '!') && chars.peek() == Some(&'=') {
+            if !cur.is_empty() {
+                tokens.push(cur.clone());
+                cur.clear();
+            }
+            let mut op = c.to_string();
+            op.push('=');
+            chars.next();
+            tokens.push(op);
+            continue;
+        }
+        if "+-*/(),%<>=!".contains(c) {
             if !cur.is_empty() {
                 tokens.push(cur.clone());
                 cur.clear();
@@ -148,7 +201,7 @@ fn tokenize(expr: &str) -> Vec<String> {
     tokens
 }
 
-// Pratt parser implementation with exponent precedence
+// Pratt parser implementation with exponent precedence and comparisons
 struct Parser {
     tokens: Vec<String>,
     pos: usize,
@@ -174,11 +227,30 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Option<Expr> {
-        let mut node = self.parse_term()?;
+        let mut node = self.parse_relation()?;
+        if let Some(tok) = self.peek() {
+            if tok == "if" {
+                self.next();
+                let cond = self.parse_expr()?;
+                if self.next()? != "else" {
+                    return None;
+                }
+                let alt = self.parse_expr()?;
+                node = Expr::Ternary(Box::new(cond), Box::new(node), Box::new(alt));
+            }
+        }
+        Some(node)
+    }
+
+    /// parse relational comparisons which have the lowest precedence
+    /// (below arithmetic).  We call `parse_sum` so that `a + b < c` is
+    /// interpreted as `(a + b) < c`.
+    fn parse_relation(&mut self) -> Option<Expr> {
+        let mut node = self.parse_sum()?;
         while let Some(op) = self.peek() {
-            if op == "+" || op == "-" {
+            if op == "<" || op == ">" || op == "<=" || op == ">=" || op == "==" || op == "!=" {
                 let op_str = self.next().unwrap();
-                let rhs = self.parse_term()?;
+                let rhs = self.parse_sum()?;
                 node = Expr::BinOp(Box::new(node), op_str, Box::new(rhs));
                 continue;
             }
@@ -187,12 +259,13 @@ impl Parser {
         Some(node)
     }
 
-    fn parse_term(&mut self) -> Option<Expr> {
-        let mut node = self.parse_power()?;
+    /// parse addition and subtraction
+    fn parse_sum(&mut self) -> Option<Expr> {
+        let mut node = self.parse_term()?;
         while let Some(op) = self.peek() {
-            if op == "*" || op == "/" || op == "%" {
+            if op == "+" || op == "-" {
                 let op_str = self.next().unwrap();
-                let rhs = self.parse_power()?;
+                let rhs = self.parse_term()?;
                 node = Expr::BinOp(Box::new(node), op_str, Box::new(rhs));
                 continue;
             }
@@ -208,6 +281,20 @@ impl Parser {
                 self.next();
                 let rhs = self.parse_power()?; // right-associative
                 node = Expr::BinOp(Box::new(node), "**".to_string(), Box::new(rhs));
+                continue;
+            }
+            break;
+        }
+        Some(node)
+    }
+
+    fn parse_term(&mut self) -> Option<Expr> {
+        let mut node = self.parse_power()?;
+        while let Some(op) = self.peek() {
+            if op == "*" || op == "/" || op == "%" {
+                let op_str = self.next().unwrap();
+                let rhs = self.parse_power()?;
+                node = Expr::BinOp(Box::new(node), op_str, Box::new(rhs));
                 continue;
             }
             break;
@@ -269,6 +356,11 @@ impl Parser {
 }
 
 // compile the simple expression to native code using cranelift
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static JIT_FUNC_COUNTER: once_cell::sync::Lazy<AtomicUsize> =
+    once_cell::sync::Lazy::new(|| AtomicUsize::new(0));
+
 fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
     // tokenize and parse
     let tokens = tokenize(expr_str);
@@ -276,55 +368,45 @@ fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
     let expr = parser.parse_expr()?;
     let arg_count = arg_names.len();
 
-    // create a new JIT module for each compilation (avoids sync issues)
-    // On aarch64 we avoid PIC so that cranelift-jit does not try to emit
-    // PLT entries (the backend currently panics with an assert when PLT
-    // generation is attempted).  Disabling PIC is safe for the few small
-    // functions we emit because the module is only used locally and we
-    // never relocate the code.
-    let mut flag_builder = settings::builder();
-    flag_builder.set("use_colocated_libcalls", "false").unwrap();
-    if cfg!(target_arch = "aarch64") {
-        flag_builder.set("is_pic", "false").unwrap();
-    } else {
-        flag_builder.set("is_pic", "true").unwrap();
-    }
-    let isa_builder = cranelift_native::builder().unwrap_or_else(|msg| {
-        panic!("host machine is not supported: {}", msg);
-    });
-    let isa = isa_builder
-        .finish(settings::Flags::new(flag_builder))
-        .expect("failed to create ISA");
-    let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-    let mut module = JITModule::new(builder);
-    let mut ctx = module.make_context();
-    ctx.func.signature.params.push(AbiParam::new(types::I64));
-    ctx.func.signature.returns.push(AbiParam::new(types::F64));
+    // perform compilation using the thread-local module instance;
+    // the closure returns the resulting pointer so we can pass it back.
+    with_jit_module(|module| {
+        let mut ctx = module.make_context();
+        ctx.func.signature.params.push(AbiParam::new(types::I64));
+        ctx.func.signature.returns.push(AbiParam::new(types::F64));
 
-    let mut func_ctx = FunctionBuilderContext::new();
-    {
-        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
-        let entry = fb.create_block();
-        fb.append_block_params_for_function_params(entry);
-        fb.switch_to_block(entry);
-        fb.seal_block(entry);
-        let ptr_val = fb.block_params(entry)[0];
-        let val = gen_expr(&expr, &mut fb, ptr_val, arg_names, &mut module);
-        fb.ins().return_(&[val]);
-        fb.finalize();
-    }
+        let mut func_ctx = FunctionBuilderContext::new();
+        {
+            let mut fb = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
+            let entry = fb.create_block();
+            fb.append_block_params_for_function_params(entry);
+            fb.switch_to_block(entry);
+            fb.seal_block(entry);
+            let ptr_val = fb.block_params(entry)[0];
+            let val = gen_expr(&expr, &mut fb, ptr_val, arg_names, module);
+            fb.ins().return_(&[val]);
+            fb.finalize();
+        }
 
-    let id = module
-        .declare_function("jit_func", Linkage::Local, &ctx.func.signature)
-        .ok()?;
-    module.define_function(id, &mut ctx).ok()?;
-    module.clear_context(&mut ctx);
-    module.finalize_definitions();
+        let idx = JIT_FUNC_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let func_name = format!("jit_func_{}", idx);
+        let id = module
+            .declare_function(&func_name, Linkage::Local, &ctx.func.signature)
+            .ok();
+        // propagate failure by returning None from outer function
+        if id.is_none() {
+            return None;
+        }
+        let id = id.unwrap();
+        module.define_function(id, &mut ctx).ok()?;
+        module.clear_context(&mut ctx);
+        module.finalize_definitions();
 
-    let code_ptr = module.get_finalized_function(id) as usize;
-    Some(JitEntry {
-        func_ptr: code_ptr,
-        arg_count,
+        let code_ptr = module.get_finalized_function(id) as usize;
+        Some(JitEntry {
+            func_ptr: code_ptr,
+            arg_count,
+        })
     })
 }
 
@@ -412,6 +494,22 @@ fn gen_expr(
                     let call = fb.ins().call(local, &[l, r]);
                     fb.inst_results(call)[0]
                 }
+                "<" | ">" | "<=" | ">=" | "==" | "!=" => {
+                    // produce 1.0 for true, 0.0 for false
+                    let cc = match op.as_str() {
+                        "<" => FloatCC::LessThan,
+                        ">" => FloatCC::GreaterThan,
+                        "<=" => FloatCC::LessThanOrEqual,
+                        ">=" => FloatCC::GreaterThanOrEqual,
+                        "==" => FloatCC::Equal,
+                        "!=" => FloatCC::NotEqual,
+                        _ => unreachable!(),
+                    };
+                    let boolv = fb.ins().fcmp(cc, l, r);
+                    let intv = fb.ins().bint(types::I64, boolv);
+                    // convert signed integer to float
+                    fb.ins().fcvt_from_sint(types::F64, intv)
+                }
                 _ => fb.ins().fadd(l, r),
             }
         }
@@ -452,6 +550,18 @@ fn gen_expr(
             let local = module.declare_func_in_func(func_id, &mut fb.func);
             let call = fb.ins().call(local, &arg_vals);
             fb.inst_results(call)[0]
+        }
+        Expr::Ternary(cond, then_expr, else_expr) => {
+            // evaluate condition and produce a boolean
+            let cond_val = gen_expr(cond, fb, ptr, arg_names, module);
+            let zero = fb.ins().f64const(0.0);
+            // any nonzero float is truthy
+            let cond_bool = fb.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
+
+            let then_val = gen_expr(then_expr, fb, ptr, arg_names, module);
+            let else_val = gen_expr(else_expr, fb, ptr, arg_names, module);
+            // select uses a B1 condition directly
+            fb.ins().select(cond_bool, then_val, else_val)
         }
     }
 }
@@ -811,6 +921,56 @@ mod tests {
         let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
         let empty: [f64; 0] = [];
         assert!((g(empty.as_ptr()) - (std::f64::consts::PI + std::f64::consts::E)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn compile_jit_relation_and_conditional() {
+        let args = vec!["x".to_string(), "y".to_string()];
+        let entry = compile_jit("x < y", &args).expect("compare");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals = [1.0, 2.0];
+        assert_eq!(f(vals.as_ptr()), 1.0);
+
+        let entry2 = compile_jit("x >= y", &args).expect("compare2");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
+        assert_eq!(g(vals.as_ptr()), 0.0);
+
+        // conditional expression (ternary)
+        let entry3 = compile_jit("x if x < y else y", &args).expect("ternary");
+        let h: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry3.func_ptr) };
+        assert_eq!(h(vals.as_ptr()), 1.0);
+    }
+
+    #[test]
+    fn compile_jit_python_api_call() {
+        // ensure execute_jit_func behaves the same as the direct-call path
+        Python::with_gil(|py| {
+            let args = vec!["x".to_string(), "y".to_string()];
+            let entry = compile_jit("x < y", &args).expect("compare");
+            let tuple = PyTuple::new(py, &[1.0_f64, 2.0_f64]);
+            let res_obj = execute_jit_func(py, &entry, tuple).expect("exec");
+            let res: f64 = res_obj.extract(py).unwrap();
+            assert_eq!(res, 1.0);
+        });
+    }
+
+    #[tokio::test]
+    async fn compile_jit_python_api_call_tokio() {
+        // same as above but run inside tokio's async test harness
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let args = vec!["x".to_string(), "y".to_string()];
+            let entry = compile_jit("x < y", &args).expect("compare");
+            let tuple = PyTuple::new(py, &[1.0_f64, 2.0_f64]);
+            // sanity check tuple contents using safe API
+            let a: f64 = tuple.get_item(0).unwrap().extract().unwrap();
+            let b: f64 = tuple.get_item(1).unwrap().extract().unwrap();
+            assert_eq!(a, 1.0);
+            assert_eq!(b, 2.0);
+            let res_obj = execute_jit_func(py, &entry, tuple).expect("exec");
+            let res: f64 = res_obj.extract(py).unwrap();
+            assert_eq!(res, 1.0);
+        });
     }
 
     #[test]

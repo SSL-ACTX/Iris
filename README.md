@@ -68,7 +68,9 @@ The JIT currently understands a modest subset of expressions:
   also link through.
 
   Arguments are comma-separated.
-> **Note:** Cranelift’s JIT backend historically relied on x86_64‑only PLT support. When running on
+  
+> [!NOTE] 
+> Cranelift’s JIT backend historically relied on x86_64‑only PLT support. When running on
 > aarch64 hardware, the runtime automatically disables PIC mode to avoid PLT relocation
 > generation; offloaded functions still execute correctly but are not position‑independent.
 
@@ -157,6 +159,13 @@ print(result)  # 3.7416573867739416
 > [!NOTE] 
 > The offload API also supports `strategy="actor"` for routing to a dedicated compute pool; consult `iris.JIT.md` for details.
 
+Currently supported JIT expression features include:
+- arithmetic: `+`, `-`, `*`, `/`, `%`, `**`
+- unary operators: `+x`, `-x`
+- math calls: `sin`, `cos`, `tan`, `exp`, `log`, `sqrt`, `pow`, `abs`
+- constants: `pi`, `e`
+- comparisons: `<`, `>`, `<=`, `>=`, `==`, `!=` (returning `1.0` or `0.0`)
+- Python ternary expressions: `a if cond else b`
 
 Iris provides a unified API across both supported languages.
 

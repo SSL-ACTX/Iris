@@ -116,6 +116,33 @@ async fn py_jit_offload_decorator_async() {
 
         // additional math helpers
         py.run("def mexp(x): return __import__('math').exp(x)", None, Some(locals)).unwrap();
+
+        // relations and conditional
+        py.run("def cmp(x,y): return 1.0 if x < y else 0.0", None, Some(locals)).unwrap();
+        let cmpf = locals.get_item("cmp").unwrap().to_object(py);
+        let _ = register
+            .call1(py, (cmpf.clone(), Some("jit"), Some("float"),
+                        Some("x < y".to_string()), Some(vec!["x".to_string(), "y".to_string()])))
+            .unwrap();
+        let ret_cmp: f64 = jitcall
+            .call1(py, (cmpf.clone(), PyTuple::new(py, &[1.0_f64, 2.0_f64]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(ret_cmp, 1.0);
+
+        py.run("def tern(x,y): return x if x<y else y", None, Some(locals)).unwrap();
+        let tern = locals.get_item("tern").unwrap().to_object(py);
+        let _ = register
+            .call1(py, (tern.clone(), Some("jit"), Some("float"),
+                        Some("x if x < y else y".to_string()), Some(vec!["x".to_string(), "y".to_string()])))
+            .unwrap();
+        let ret_tern: f64 = jitcall
+            .call1(py, (tern, PyTuple::new(py, &[2.0_f64, 1.0_f64]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(ret_tern, 1.0);
         let mexp = locals.get_item("mexp").unwrap().to_object(py);
         let _decorated_exp: PyObject = register
             .call1(py, (mexp.clone(), Some("jit"), Some("float"),
