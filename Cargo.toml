@@ -1,6 +1,6 @@
 [package]
 name = "iris"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Iris — embedded actor mesh"
 license = "AGPL-3.0"

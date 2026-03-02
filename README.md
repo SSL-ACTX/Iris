@@ -2,7 +2,7 @@
 
 ![Iris Banner](https://svg-banners.vercel.app/api?type=luminance&text1=Iris%20🌸&width=800&height=200&color=FFB6C1)
 
-![Version](https://img.shields.io/badge/version-0.3.0-blue.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-0.4.0-blue.svg?style=for-the-badge)
 ![Language](https://img.shields.io/badge/language-Rust%20%7C%20Python%20%7C%20Node.js-orange.svg?style=for-the-badge&logo=rust)
 ![License](https://img.shields.io/badge/license-AGPL_3.0-green.svg?style=for-the-badge)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android-lightgrey.svg?style=for-the-badge&logo=linux)
@@ -68,7 +68,7 @@ The JIT currently understands a modest subset of expressions:
   also link through.
 
   Arguments are comma-separated.
-  
+
 > [!NOTE] 
 > Cranelift’s JIT backend historically relied on x86_64‑only PLT support. When running on
 > aarch64 hardware, the runtime automatically disables PIC mode to avoid PLT relocation
@@ -632,6 +632,6 @@ Supported. Ensure you have the latest Microsoft C++ Build Tools installed for Py
 
 **Author:** Seuriin ([SSL-ACTX](https://github.com/SSL-ACTX))
 
-*v0.3.0*
+*v0.4.0*
 
 </div>
