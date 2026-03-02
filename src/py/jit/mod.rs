@@ -460,6 +460,25 @@ fn gen_expr(
                     // are *not* optimized to avoid introducing divide-by-zero
                     // behaviour; they fall through to `pow`.
                     if let Expr::Const(n) = **rhs {
+                        if n == 1.0 {
+                            return l;
+                        }
+                        if n == -1.0 {
+                            let one = fb.ins().f64const(1.0);
+                            return fb.ins().fdiv(one, l);
+                        }
+                        // common sqrt form used in vector norms
+                        if n == 0.5 {
+                            let mut sig = module.make_signature();
+                            sig.params.push(AbiParam::new(types::F64));
+                            sig.returns.push(AbiParam::new(types::F64));
+                            let fid = module
+                                .declare_function("sqrt", Linkage::Import, &sig)
+                                .expect("failed to declare sqrt");
+                            let local = module.declare_func_in_func(fid, &mut fb.func);
+                            let call = fb.ins().call(local, &[l]);
+                            return fb.inst_results(call)[0];
+                        }
                         if n.fract() == 0.0 {
                             let exp = n as i64;
                             if exp == 0 {
@@ -976,7 +995,6 @@ mod tests {
     #[test]
     fn compile_jit_power_op() {
         // simple power
-        let args = vec!["x".to_string()];
         let entry = compile_jit("2 ** 3", &[]).expect("const power");
         let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
         let empty: [f64; 0] = [];
@@ -996,6 +1014,16 @@ mod tests {
         let entry4 = compile_jit("2 ** -2", &[]).expect("neg exp");
         let k: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry4.func_ptr) };
         assert!((k(empty.as_ptr()) - 0.25).abs() < 1e-12);
+
+        // fast sqrt rewrite for exponent 0.5
+        let entry5 = compile_jit("9 ** 0.5", &[]).expect("sqrt rewrite");
+        let q: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry5.func_ptr) };
+        assert!((q(empty.as_ptr()) - 3.0).abs() < 1e-12);
+
+        // reciprocal rewrite for exponent -1
+        let entry6 = compile_jit("8 ** -1", &[]).expect("reciprocal rewrite");
+        let r: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry6.func_ptr) };
+        assert!((r(empty.as_ptr()) - 0.125).abs() < 1e-12);
     }
 
     #[test]

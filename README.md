@@ -167,6 +167,8 @@ Currently supported JIT expression features include:
 - comparisons: `<`, `>`, `<=`, `>=`, `==`, `!=` (returning `1.0` or `0.0`)
 - Python ternary expressions: `a if cond else b`
 
+The JIT also applies lightweight exponent rewrites for common cases (e.g. `x ** 0.5` becomes `sqrt(x)`, and `x ** -1` becomes `1.0 / x`) to cut `pow` call overhead.
+
 Iris provides a unified API across both supported languages.
 
 ### 1. High-Performance Push Actors (Recommended)

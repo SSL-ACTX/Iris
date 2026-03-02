@@ -81,7 +81,8 @@ Instead of dynamic compilation, we leverage Iris's existing actor primitives to 
    * binary ops `+ - * /` and `%`
    * unary `+`/`-`
    * exponentiation `**` (compiled to `pow` or strength‑reduced when the
-     exponent is a small integer)
+     exponent is a small integer; additionally uses direct rewrites for
+     common constants such as `x ** 0.5 -> sqrt(x)` and `x ** -1 -> 1.0/x`)
    * comparison operators (`<`, `>`, `<=`, `>=`, `==`, `!=`) returning `1.0`/`0.0`
    * Python ternary `x if cond else y` with the standard semantics
    * simple function calls with one or two `float` arguments (e.g. `sin(x)`, `pow(a,b)`),
