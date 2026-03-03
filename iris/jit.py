@@ -15,11 +15,44 @@ import warnings
 from typing import Callable, Optional, Any
 
 try:
-    from .iris import register_offload, offload_call, call_jit  # pyo3 extension
+    from .iris import (
+        register_offload,
+        offload_call,
+        call_jit,
+        configure_jit_logging,
+        is_jit_logging_enabled,
+    )  # pyo3 extension
 except ImportError:  # allow tests to import without extension built
     register_offload = None  # type: ignore
     offload_call = None  # type: ignore
     call_jit = None  # type: ignore
+    configure_jit_logging = None  # type: ignore
+    is_jit_logging_enabled = None  # type: ignore
+
+
+def set_jit_logging(enabled: Optional[bool] = None, env_var: Optional[str] = None) -> bool:
+    """Configure low-level Rust JIT logging.
+
+    Parameters
+    ----------
+    enabled:
+        - ``True``: force logs on
+        - ``False``: force logs off
+        - ``None``: use environment variable mode
+    env_var:
+        Environment variable name to read when ``enabled`` is ``None``.
+        Default is ``IRIS_JIT_LOG``.
+    """
+    if configure_jit_logging is None:
+        return False
+    return bool(configure_jit_logging(enabled, env_var))
+
+
+def get_jit_logging() -> bool:
+    """Return whether Rust JIT logging is currently enabled."""
+    if is_jit_logging_enabled is None:
+        return False
+    return bool(is_jit_logging_enabled())
 
 
 def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:

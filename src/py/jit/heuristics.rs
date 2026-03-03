@@ -6,6 +6,8 @@
 
 use crate::py::jit::parser::Expr;
 
+const MAX_CONST_LOOP_ITERS: usize = 1_000_000;
+
 /// Try to express `expr` as `a*var + b` where `var` is the loop variable.
 /// Returns coefficients `(a,b)` if successful.
 fn extract_linear(expr: &Expr, var: &str) -> Option<(f64, f64)> {
@@ -138,7 +140,16 @@ pub fn optimize(expr: Expr) -> Expr {
                     "-" => a - b,
                     "*" => a * b,
                     "/" => a / b,
+                    "%" => a % b,
                     "**" => a.powf(*b),
+                    "and" => if *a != 0.0 && *b != 0.0 { 1.0 } else { 0.0 },
+                    "or" => if *a != 0.0 || *b != 0.0 { 1.0 } else { 0.0 },
+                    "==" => if (a - b).abs() < f64::EPSILON { 1.0 } else { 0.0 },
+                    "!=" => if (a - b).abs() >= f64::EPSILON { 1.0 } else { 0.0 },
+                    "<" => if a < b { 1.0 } else { 0.0 },
+                    "<=" => if a <= b { 1.0 } else { 0.0 },
+                    ">" => if a > b { 1.0 } else { 0.0 },
+                    ">=" => if a >= b { 1.0 } else { 0.0 },
                     _ => return Expr::BinOp(Box::new(lhs), op, Box::new(rhs)),
                 };
                 return Expr::Const(v);
@@ -173,6 +184,10 @@ pub fn optimize(expr: Expr) -> Expr {
                 match op.as_str() {
                     "-" => return Expr::Const(0.0),
                     "/" => return Expr::Const(1.0),
+                    "==" => return Expr::Const(1.0),
+                    "!=" => return Expr::Const(0.0),
+                    "<" | ">" => return Expr::Const(0.0),
+                    "<=" | ">=" => return Expr::Const(1.0),
                     _ => {}
                 }
             }
@@ -181,6 +196,41 @@ pub fn optimize(expr: Expr) -> Expr {
                     if **inner == lhs {
                         return Expr::Const(0.0);
                     }
+                }
+            }
+
+            if op == "and" {
+                if matches!(lhs, Expr::Const(0.0)) || matches!(rhs, Expr::Const(0.0)) {
+                    return Expr::Const(0.0);
+                }
+                if let Expr::Const(v) = lhs {
+                    if v != 0.0 {
+                        return rhs;
+                    }
+                }
+                if let Expr::Const(v) = rhs {
+                    if v != 0.0 {
+                        return lhs;
+                    }
+                }
+            }
+
+            if op == "or" {
+                if let Expr::Const(v) = lhs {
+                    if v != 0.0 {
+                        return Expr::Const(1.0);
+                    }
+                }
+                if let Expr::Const(v) = rhs {
+                    if v != 0.0 {
+                        return Expr::Const(1.0);
+                    }
+                }
+                if matches!(lhs, Expr::Const(0.0)) {
+                    return rhs;
+                }
+                if matches!(rhs, Expr::Const(0.0)) {
+                    return lhs;
                 }
             }
 
@@ -194,9 +244,16 @@ pub fn optimize(expr: Expr) -> Expr {
                     return *inner.clone();
                 }
             }
+            if let Expr::UnaryOp('!', inner) = &expr {
+                if c == '!' {
+                    return *inner.clone();
+                }
+            }
             if let Expr::Const(a) = expr {
                 if c == '-' {
                     Expr::Const(-a)
+                } else if c == '!' {
+                    Expr::Const(if a == 0.0 { 1.0 } else { 0.0 })
                 } else {
                     Expr::UnaryOp(c, Box::new(Expr::Const(a)))
                 }
@@ -208,6 +265,9 @@ pub fn optimize(expr: Expr) -> Expr {
             let cond = optimize(*cond);
             let thenb = optimize(*thenb);
             let elseb = optimize(*elseb);
+            if thenb == elseb {
+                return thenb;
+            }
             if let Expr::Const(c) = &cond {
                 return if *c != 0.0 { thenb } else { elseb };
             }
@@ -224,23 +284,30 @@ pub fn optimize(expr: Expr) -> Expr {
             }
             Expr::Call(name, args)
         }
-        Expr::SumFor { iter_var, start, end, body } => {
+        Expr::SumFor { iter_var, start, end, step, body, pred } => {
             let start = optimize(*start);
             let end = optimize(*end);
+            let step = step.map(|s| Box::new(optimize(*s)));
             let body = optimize(*body);
+            let pred = pred.map(|p| Box::new(optimize(*p)));
 
             // quadratic rewrite when range starts at zero and body is quadratic
             if matches!(start, Expr::Const(0.0)) {
-                if let Some((a_coeff, b_coeff, c_coeff)) = extract_quadratic(&body, &iter_var) {
-                    eprintln!("quadratic detected coeffs: {:?}, body={:?}", (a_coeff, b_coeff, c_coeff), body);
-                    // rewrite using formula with n = end
-                    let formula = build_quadratic_sum_formula(a_coeff, b_coeff, c_coeff, end.clone());
-                    return optimize(formula);
+                // only apply when step is 1 and there is no predicate
+                let allow = pred.is_none()
+                    && (step.is_none() || step.as_ref().and_then(|e| eval_const(e)).unwrap_or(1.0) == 1.0);
+                if allow {
+                    if let Some((a_coeff, b_coeff, c_coeff)) = extract_quadratic(&body, &iter_var) {
+                        // rewrite using formula with n = end
+                        let formula = build_quadratic_sum_formula(a_coeff, b_coeff, c_coeff, end.clone());
+                        return optimize(formula);
+                    }
                 }
             }
 
             // handle simple coefficient-of-variable pattern: i * k or k * i
-            if let Expr::BinOp(lc, op, rc) = &body {
+            if pred.is_none() && step.is_none() {
+                if let Expr::BinOp(lc, op, rc) = &body {
                 if op == "*" {
                     if **lc == Expr::Var(iter_var.clone()) {
                         let coeff = *rc.clone();
@@ -248,7 +315,9 @@ pub fn optimize(expr: Expr) -> Expr {
                             iter_var: iter_var.clone(),
                             start: Box::new(start.clone()),
                             end: Box::new(end.clone()),
+                            step: None,
                             body: Box::new(Expr::Var(iter_var.clone())),
+                            pred: None,
                         };
                         return optimize(Expr::BinOp(Box::new(coeff), "*".to_string(), Box::new(sum_i)));
                     }
@@ -258,28 +327,39 @@ pub fn optimize(expr: Expr) -> Expr {
                             iter_var: iter_var.clone(),
                             start: Box::new(start.clone()),
                             end: Box::new(end.clone()),
+                            step: None,
                             body: Box::new(Expr::Var(iter_var.clone())),
+                            pred: None,
                         };
                         return optimize(Expr::BinOp(Box::new(coeff), "*".to_string(), Box::new(sum_i)));
                     }
                 }
             }
+            }
 
-            // try to decompose nontrivial linear body a*i + b
-            if !matches!(body, Expr::Var(_) | Expr::Const(_)) {
+            // try to decompose nontrivial linear body a*i + b (only when
+            // step is not provided or equals 1)
+            if (step.is_none() || step.as_ref().and_then(|e| eval_const(e)).unwrap_or(1.0) == 1.0)
+                && pred.is_none()
+                && !matches!(body, Expr::Var(_) | Expr::Const(_))
+            {
                 if let Some((a_coeff, b_const)) = extract_linear(&body, &iter_var) {
                     let var = iter_var.clone();
                     let sum_i = Expr::SumFor {
                         iter_var: var.clone(),
                         start: Box::new(start.clone()),
                         end: Box::new(end.clone()),
+                        step: None,
                         body: Box::new(Expr::Var(var.clone())),
+                        pred: None,
                     };
                     let sum_one = Expr::SumFor {
                         iter_var: var.clone(),
                         start: Box::new(start.clone()),
                         end: Box::new(end.clone()),
+                        step: None,
                         body: Box::new(Expr::Const(1.0)),
+                        pred: None,
                     };
                     let rewritten = Expr::BinOp(
                         Box::new(Expr::BinOp(
@@ -300,32 +380,74 @@ pub fn optimize(expr: Expr) -> Expr {
 
             // if bounds are constant we can sometimes reduce the loop
             if let (Expr::Const(a), Expr::Const(b)) = (&start, &end) {
-                let len = b - a; // number of iterations (exclusive end)
+                let len = b - a; // number of iterations (exclusive end when step=1)
                 if len.is_finite() {
                     // case 1: body is just the loop variable -> arithmetic series
-                    if body == Expr::Var(iter_var.clone()) {
+                    // only valid for unfiltered default-step loops
+                    if body == Expr::Var(iter_var.clone()) && step.is_none() && pred.is_none() {
+                        if b <= a {
+                            return Expr::Const(0.0);
+                        }
                         // sum over i=a..b-1 = n*(a + (b-1))/2
                         let sum = len * (a + (b - 1.0)) / 2.0;
                         return Expr::Const(sum);
                     }
                     // case 2: body is constant -> constant*len
+                    // only valid for unfiltered default-step loops
                     if let Expr::Const(c) = body {
-                        return Expr::Const(c * len);
+                        if step.is_none() && pred.is_none() {
+                            if b <= a {
+                                return Expr::Const(0.0);
+                            }
+                            return Expr::Const(c * len);
+                        }
                     }
-                    // general constant evaluation using interpreter
+                    // general constant evaluation using interpreter (handles step/pred)
                     if let (Some(a0), Some(b0)) = (eval_const(&start), eval_const(&end)) {
+                        let step0 = if let Some(st) = &step {
+                            eval_const(st).unwrap_or(1.0)
+                        } else {
+                            1.0
+                        };
+                        if !step0.is_finite() || step0.abs() < f64::EPSILON {
+                            return Expr::SumFor {
+                                iter_var,
+                                start: Box::new(start),
+                                end: Box::new(end),
+                                step,
+                                body: Box::new(body),
+                                pred,
+                            };
+                        }
                         let mut acc = 0.0;
-                        for i in (a0 as i64)..(b0 as i64) {
-                            let mut env = std::collections::HashMap::new();
-                            env.insert(iter_var.clone(), i as f64);
-                            if let Some(v) = eval_expr(&body, &env) {
-                                acc += v;
-                            } else {
-                                acc = std::f64::NAN;
+                        let mut x = a0;
+                        let mut iters = 0usize;
+                        let mut completed = true;
+                        let positive = step0 >= 0.0;
+                        while if positive { x < b0 } else { x > b0 } {
+                            if iters >= MAX_CONST_LOOP_ITERS {
+                                completed = false;
                                 break;
                             }
+                            let mut env = std::collections::HashMap::new();
+                            env.insert(iter_var.clone(), x);
+                            let mut addv = if let Some(v) = eval_expr(&body, &env) {
+                                v
+                            } else {
+                                std::f64::NAN
+                            };
+                            if let Some(pred_expr) = &pred {
+                                if let Some(pv) = eval_expr(pred_expr, &env) {
+                                    if pv == 0.0 {
+                                        addv = 0.0;
+                                    }
+                                }
+                            }
+                            acc += addv;
+                            x += step0;
+                            iters += 1;
                         }
-                        if acc.is_finite() {
+                        if completed && acc.is_finite() {
                             return Expr::Const(acc);
                         }
                     }
@@ -336,7 +458,9 @@ pub fn optimize(expr: Expr) -> Expr {
                 iter_var,
                 start: Box::new(start),
                 end: Box::new(end),
+                step,
                 body: Box::new(body),
+                pred,
             }
         },
         other => other,
@@ -350,7 +474,8 @@ fn evaluate_call(name: &str, args: &[Expr]) -> Option<f64> {
         .iter()
         .map(|e| if let Expr::Const(v) = e { *v } else { 0.0 })
         .collect();
-    match (name, vals.as_slice()) {
+    let fname = name.strip_prefix("math.").unwrap_or(name);
+    match (fname, vals.as_slice()) {
         ("sin", [x]) => Some(x.sin()),
         ("cos", [x]) => Some(x.cos()),
         ("tan", [x]) => Some(x.tan()),
@@ -361,6 +486,12 @@ fn evaluate_call(name: &str, args: &[Expr]) -> Option<f64> {
         ("log", [x]) => Some(x.ln()),
         ("sqrt", [x]) => Some(x.sqrt()),
         ("abs", [x]) => Some(x.abs()),
+        ("floor", [x]) => Some(x.floor()),
+        ("ceil", [x]) => Some(x.ceil()),
+        ("int", [x]) => Some(x.trunc()),
+        ("float", [x]) => Some(*x),
+        ("min", [x, y]) => Some(x.min(*y)),
+        ("max", [x, y]) => Some(x.max(*y)),
         ("pow", [x, y]) => Some(x.powf(*y)),
         _ => None,
     }
@@ -380,19 +511,40 @@ fn eval_expr(expr: &Expr, env: &std::collections::HashMap<String, f64>) -> Optio
                 "-" => Some(a - b),
                 "*" => Some(a * b),
                 "/" => Some(a / b),
+                "%" => Some(a % b),
                 "**" => Some(a.powf(b)),
+                "and" => Some(if a != 0.0 && b != 0.0 { 1.0 } else { 0.0 }),
+                "or" => Some(if a != 0.0 || b != 0.0 { 1.0 } else { 0.0 }),
+                "==" => Some(if (a - b).abs() < f64::EPSILON { 1.0 } else { 0.0 }),
+                "!=" => Some(if (a - b).abs() >= f64::EPSILON { 1.0 } else { 0.0 }),
+                "<" => Some(if a < b { 1.0 } else { 0.0 }),
+                "<=" => Some(if a <= b { 1.0 } else { 0.0 }),
+                ">" => Some(if a > b { 1.0 } else { 0.0 }),
+                ">=" => Some(if a >= b { 1.0 } else { 0.0 }),
                 _ => None,
             }
         }
         Expr::UnaryOp(c, e) => {
             let v = eval_expr(e, env)?;
-            if *c == '-' { Some(-v) } else { Some(v) }
+            match *c {
+                '-' => Some(-v),
+                '!' => Some(if v == 0.0 { 1.0 } else { 0.0 }),
+                _ => Some(v),
+            }
         }
         Expr::Call(name, args) => {
             let vals: Vec<Expr> = args.iter().filter_map(|e| {
                 eval_expr(e, env).map(Expr::Const)
             }).collect();
             evaluate_call(name, &vals)
+        }
+        Expr::Ternary(cond, thenb, elseb) => {
+            let c = eval_expr(cond, env)?;
+            if c != 0.0 {
+                eval_expr(thenb, env)
+            } else {
+                eval_expr(elseb, env)
+            }
         }
         _ => None,
     }
@@ -474,6 +626,16 @@ mod tests {
     }
 
     #[test]
+    fn const_math_dotted_and_cast_calls() {
+        assert_eq!(optimize(parse("math.sin(0)")), Expr::Const(0.0));
+        assert_eq!(optimize(parse("math.cos(0)")), Expr::Const(1.0));
+        assert_eq!(optimize(parse("int(3.9)")), Expr::Const(3.0));
+        assert_eq!(optimize(parse("float(4)")), Expr::Const(4.0));
+        assert_eq!(optimize(parse("floor(3.9)")), Expr::Const(3.0));
+        assert_eq!(optimize(parse("ceil(3.1)")), Expr::Const(4.0));
+    }
+
+    #[test]
     fn linear_sum_constant_bounds() {
         // sum(2*i + 3 for i in range(0,4)) -> compute constants
         assert_eq!(
@@ -486,7 +648,6 @@ mod tests {
     fn linear_sum_variable_bounds() {
         let expr = parse("sum(2*i + 3 for i in range(n))");
         let out = optimize(expr.clone());
-        eprintln!("linear var bounds: {:?} -> {:?}", expr, out);
         // should at least change
         assert_ne!(out, expr);
     }
@@ -495,7 +656,6 @@ mod tests {
     fn quadratic_rewrites() {
         let expr = parse("sum(i*i for i in range(n))");
         let out = optimize(expr.clone());
-        eprintln!("quadratic var bounds: {:?} -> {:?}", expr, out);
         assert_ne!(out, expr);
         // evaluate for a few n to ensure equivalence
         let mut env = std::collections::HashMap::new();
@@ -519,5 +679,91 @@ mod tests {
         let out = optimize(expr.clone());
         // computed manually: (-1)+0+3+8+15 = 25
         assert_eq!(out, Expr::Const(25.0));
+    }
+
+    #[test]
+    fn step_and_predicate() {
+        assert_eq!(optimize(parse("sum(i for i in range(0,5,2))")), Expr::Const(6.0));
+        assert_eq!(optimize(parse("sum(i for i in range(5) if i % 2 == 0)")), Expr::Const(6.0));
+    }
+
+    #[test]
+    fn relation_constant_folding() {
+        assert_eq!(optimize(parse("2 < 3")), Expr::Const(1.0));
+        assert_eq!(optimize(parse("2 > 3")), Expr::Const(0.0));
+        assert_eq!(optimize(parse("4 == 4")), Expr::Const(1.0));
+        assert_eq!(optimize(parse("4 != 4")), Expr::Const(0.0));
+        assert_eq!(optimize(parse("7 % 3")), Expr::Const(1.0));
+    }
+
+    #[test]
+    fn comparison_chain_semantics() {
+        assert_eq!(optimize(parse("1 < 2 < 3")), Expr::Const(1.0));
+        assert_eq!(optimize(parse("3 < 2 < 1")), Expr::Const(0.0));
+    }
+
+    #[test]
+    fn boolean_and_or_folding() {
+        assert_eq!(optimize(parse("1 and 1")), Expr::Const(1.0));
+        assert_eq!(optimize(parse("1 and 0")), Expr::Const(0.0));
+        assert_eq!(optimize(parse("0 or 1")), Expr::Const(1.0));
+        assert_eq!(optimize(parse("0 or 0")), Expr::Const(0.0));
+        assert_eq!(optimize(parse("x and 1")), parse("x"));
+        assert_eq!(optimize(parse("x or 0")), parse("x"));
+    }
+
+    #[test]
+    fn boolean_not_folding() {
+        assert_eq!(optimize(parse("not 0")), Expr::Const(1.0));
+        assert_eq!(optimize(parse("not 2")), Expr::Const(0.0));
+        assert_eq!(optimize(parse("not not x")), parse("x"));
+    }
+
+    #[test]
+    fn boolean_literal_folding() {
+        assert_eq!(optimize(parse("True and x")), parse("x"));
+        assert_eq!(optimize(parse("False or x")), parse("x"));
+        assert_eq!(optimize(parse("x if True else y")), parse("x"));
+        assert_eq!(optimize(parse("x if False else y")), parse("y"));
+    }
+
+    #[test]
+    fn ternary_same_branch_collapses() {
+        assert_eq!(optimize(parse("x if y else x")), parse("x"));
+    }
+
+    #[test]
+    fn descending_default_range_is_empty() {
+        assert_eq!(optimize(parse("sum(i for i in range(5,0))")), Expr::Const(0.0));
+    }
+
+    #[test]
+    fn zero_step_is_not_folded() {
+        let expr = parse("sum(i for i in range(0,5,0))");
+        assert_eq!(optimize(expr.clone()), expr);
+    }
+
+    #[test]
+    fn constant_loop_with_ternary_body() {
+        assert_eq!(
+            optimize(parse("sum(1 if i % 2 == 0 else 2 for i in range(5))")),
+            Expr::Const(7.0)
+        );
+    }
+
+    #[test]
+    fn constant_loop_with_boolean_predicate() {
+        assert_eq!(
+            optimize(parse("sum(i for i in range(6) if i > 1 and i < 5)")),
+            Expr::Const(9.0)
+        );
+    }
+
+    #[test]
+    fn constant_loop_with_not_predicate() {
+        assert_eq!(
+            optimize(parse("sum(i for i in range(5) if not i % 2 == 0)")),
+            Expr::Const(4.0)
+        );
     }
 }

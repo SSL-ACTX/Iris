@@ -65,13 +65,16 @@ pub enum Expr {
         iter_var: String,
         start: Box<Expr>,
         end: Box<Expr>,
+        step: Option<Box<Expr>>,
         body: Box<Expr>,
+        pred: Option<Box<Expr>>,
     },
     /// generator over a runtime container (e.g. Python list/ndarray)
     SumOver {
         iter_var: String,
         container: Box<Expr>,
         body: Box<Expr>,
+        pred: Option<Box<Expr>>,
     },
 }
 
@@ -101,7 +104,7 @@ impl Parser {
     }
 
     pub fn parse_expr(&mut self) -> Option<Expr> {
-        let mut node = self.parse_relation()?;
+        let mut node = self.parse_or()?;
         if let Some(tok) = self.peek() {
             if tok == "if" {
                 self.next();
@@ -116,20 +119,74 @@ impl Parser {
         Some(node)
     }
 
-    /// parse relational comparisons which have the lowest precedence
-    /// (below arithmetic).  We call `parse_sum` so that `a + b < c` is
-    /// interpreted as `(a + b) < c`.
-    fn parse_relation(&mut self) -> Option<Expr> {
-        let mut node = self.parse_sum()?;
+    fn parse_or(&mut self) -> Option<Expr> {
+        let mut node = self.parse_and()?;
         while let Some(op) = self.peek() {
-            if op == "<" || op == ">" || op == "<=" || op == ">=" || op == "==" || op == "!=" {
+            if op == "or" {
                 let op_str = self.next().unwrap();
-                let rhs = self.parse_sum()?;
+                let rhs = self.parse_and()?;
                 node = Expr::BinOp(Box::new(node), op_str, Box::new(rhs));
                 continue;
             }
             break;
         }
+        Some(node)
+    }
+
+    fn parse_and(&mut self) -> Option<Expr> {
+        let mut node = self.parse_not()?;
+        while let Some(op) = self.peek() {
+            if op == "and" {
+                let op_str = self.next().unwrap();
+                let rhs = self.parse_not()?;
+                node = Expr::BinOp(Box::new(node), op_str, Box::new(rhs));
+                continue;
+            }
+            break;
+        }
+        Some(node)
+    }
+
+    fn parse_not(&mut self) -> Option<Expr> {
+        if matches!(self.peek(), Some("not")) {
+            self.next();
+            let inner = self.parse_not()?;
+            return Some(Expr::UnaryOp('!', Box::new(inner)));
+        }
+        self.parse_relation()
+    }
+
+    /// parse relational comparisons which have the lowest precedence
+    /// (below arithmetic).  We call `parse_sum` so that `a + b < c` is
+    /// interpreted as `(a + b) < c`.
+    fn parse_relation(&mut self) -> Option<Expr> {
+        let mut node = self.parse_sum()?;
+        let mut chain: Vec<(String, Expr)> = Vec::new();
+        while let Some(op) = self.peek() {
+            if op == "<" || op == ">" || op == "<=" || op == ">=" || op == "==" || op == "!=" {
+                let op_str = self.next().unwrap();
+                let rhs = self.parse_sum()?;
+                chain.push((op_str, rhs));
+                continue;
+            }
+            break;
+        }
+
+        if chain.is_empty() {
+            return Some(node);
+        }
+
+        // Python-style comparison chaining:
+        // a < b < c  ==>  (a < b) and (b < c)
+        let (first_op, first_rhs) = chain[0].clone();
+        let mut result = Expr::BinOp(Box::new(node.clone()), first_op, Box::new(first_rhs.clone()));
+        let mut prev_rhs = first_rhs;
+        for (op, rhs) in chain.into_iter().skip(1) {
+            let cmp = Expr::BinOp(Box::new(prev_rhs.clone()), op, Box::new(rhs.clone()));
+            result = Expr::BinOp(Box::new(result), "and".to_string(), Box::new(cmp));
+            prev_rhs = rhs;
+        }
+        node = result;
         Some(node)
     }
 
@@ -205,6 +262,12 @@ impl Parser {
             if let Ok(num) = tok.parse::<f64>() {
                 return Some(Expr::Const(num));
             }
+            if tok == "True" {
+                return Some(Expr::Const(1.0));
+            }
+            if tok == "False" {
+                return Some(Expr::Const(0.0));
+            }
             // identifier or function call
             if let Some(peek) = self.peek() {
                 if peek == "(" {
@@ -221,23 +284,36 @@ impl Parser {
                             }
                             // look ahead to see if this is a range() or a container
                             if matches!(self.peek(), Some("range")) {
-                                let range_kw = self.next()?;
+                                let _range_kw = self.next()?;
                                 let open = self.next()?;
                                 if open != "(" {
                                     return None;
                                 }
                                 let first = self.parse_expr()?;
-                                let (start, end) = if matches!(self.peek(), Some(",")) {
+                                // parse up to three range arguments
+                                let (start, end, step) = if matches!(self.peek(), Some(",")) {
                                     self.next(); // comma
                                     let second = self.parse_expr()?;
-                                    (first, second)
+                                    if matches!(self.peek(), Some(",")) {
+                                        self.next();
+                                        let third = self.parse_expr()?;
+                                        (first, second, Some(third))
+                                    } else {
+                                        (first, second, None)
+                                    }
                                 } else {
-                                    (Expr::Const(0.0), first)
+                                    (Expr::Const(0.0), first, None)
                                 };
                                 if !matches!(self.peek(), Some(")")) {
                                     return None;
                                 }
                                 self.next(); // inner ')'
+                                // optional predicate after range
+                                let mut pred: Option<Box<Expr>> = None;
+                                if matches!(self.peek(), Some("if")) {
+                                    self.next();
+                                    pred = Some(Box::new(self.parse_expr()?));
+                                }
                                 if !matches!(self.peek(), Some(")")) {
                                     return None;
                                 }
@@ -246,7 +322,9 @@ impl Parser {
                                     iter_var,
                                     start: Box::new(start),
                                     end: Box::new(end),
+                                    step: step.map(Box::new),
                                     body: Box::new(body_expr),
+                                    pred,
                                 });
                             } else {
                                 // container form: parse single expr for container
@@ -259,6 +337,7 @@ impl Parser {
                                     iter_var,
                                     container: Box::new(container),
                                     body: Box::new(body_expr),
+                                    pred: None,
                                 });
                             }
                         } else {
@@ -328,6 +407,54 @@ mod tests {
         match ast {
             Expr::Call(_, _) => panic!("generator parsed as regular call"),
             Expr::SumFor {..} => {}
+            other => panic!("unexpected AST: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_boolean_precedence() {
+        let tokens = tokenize("x < y and y < z or k");
+        let mut p = Parser::new(tokens);
+        let ast = p.parse_expr().expect("should parse");
+        match ast {
+            Expr::BinOp(_, op, _) => assert_eq!(op, "or"),
+            other => panic!("unexpected AST: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_not_precedence() {
+        let tokens = tokenize("not x < y and z");
+        let mut p = Parser::new(tokens);
+        let ast = p.parse_expr().expect("should parse");
+        match ast {
+            Expr::BinOp(lhs, op, _) => {
+                assert_eq!(op, "and");
+                match *lhs {
+                    Expr::UnaryOp('!', _) => {}
+                    other => panic!("expected not-unary on lhs, got: {:?}", other),
+                }
+            }
+            other => panic!("unexpected AST: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_boolean_literals() {
+        let mut p_true = Parser::new(tokenize("True"));
+        assert_eq!(p_true.parse_expr(), Some(Expr::Const(1.0)));
+
+        let mut p_false = Parser::new(tokenize("False"));
+        assert_eq!(p_false.parse_expr(), Some(Expr::Const(0.0)));
+    }
+
+    #[test]
+    fn parse_comparison_chain() {
+        let tokens = tokenize("a < b < c");
+        let mut p = Parser::new(tokens);
+        let ast = p.parse_expr().expect("should parse");
+        match ast {
+            Expr::BinOp(_, op, _) => assert_eq!(op, "and"),
             other => panic!("unexpected AST: {:?}", other),
         }
     }

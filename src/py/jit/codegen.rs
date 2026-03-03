@@ -79,24 +79,26 @@ pub fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
     let tokens = crate::py::jit::parser::tokenize(expr_str);
     let mut parser = crate::py::jit::parser::Parser::new(tokens);
     let mut expr = parser.parse_expr()?;
-    eprintln!("[Iris][jit] parsed AST for '{}': {:?}", expr_str, expr);
+    crate::py::jit::jit_log(|| format!("[Iris][jit] parsed AST for '{}': {:?}", expr_str, expr));
     // detect generator-style loop over a container and convert to body-only
     // expression.  Python wrapper will pass the container buffer and the
     // JIT runtime will vectorize across it; the compiled function gets a
     // single scalar argument representing each element.
     let mut adjusted_args = arg_names.to_vec();
     // use a cloned copy when destructuring to release borrow immediately
-    if let Expr::SumOver { iter_var, container, body } = expr.clone() {
+    if let Expr::SumOver { iter_var, container, body, pred: _ } = expr.clone() {
         if let Expr::Var(ref cont_name) = *container {
             if adjusted_args.len() == 1 && adjusted_args[0] == *cont_name {
-                eprintln!("[Iris][jit] converting SumOver '{}' in {}", iter_var, cont_name);
-                expr = (*body.clone());
+                crate::py::jit::jit_log(|| {
+                    format!("[Iris][jit] converting SumOver '{}' in {}", iter_var, cont_name)
+                });
+                expr = *body.clone();
                 adjusted_args = vec![iter_var.clone()];
             }
         }
     }
     expr = heuristics::optimize(expr);
-    eprintln!("[Iris][jit] optimized AST: {:?}", expr);
+    crate::py::jit::jit_log(|| format!("[Iris][jit] optimized AST: {:?}", expr));
     let arg_count = adjusted_args.len();
 
     // perform compilation using the thread-local module instance;
@@ -130,7 +132,7 @@ pub fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
         }
         let id = id.unwrap();
         if let Err(err) = module.define_function(id, &mut ctx) {
-            eprintln!("[Iris][jit] define_function failed: {:?}", err);
+            crate::py::jit::jit_log(|| format!("[Iris][jit] define_function failed: {:?}", err));
             return None;
         }
         module.clear_context(&mut ctx);
@@ -258,6 +260,18 @@ fn gen_expr(
                     let intv = fb.ins().bint(types::I64, boolv);
                     fb.ins().fcvt_from_sint(types::F64, intv)
                 }
+                "and" | "or" => {
+                    let zero = fb.ins().f64const(0.0);
+                    let l_true = fb.ins().fcmp(FloatCC::NotEqual, l, zero);
+                    let r_true = fb.ins().fcmp(FloatCC::NotEqual, r, zero);
+                    let boolv = if op == "and" {
+                        fb.ins().band(l_true, r_true)
+                    } else {
+                        fb.ins().bor(l_true, r_true)
+                    };
+                    let intv = fb.ins().bint(types::I64, boolv);
+                    fb.ins().fcvt_from_sint(types::F64, intv)
+                }
                 _ => fb.ins().fadd(l, r),
             }
         }
@@ -267,6 +281,12 @@ fn gen_expr(
                 '-' => {
                     let zero = fb.ins().f64const(0.0);
                     fb.ins().fsub(zero, v)
+                }
+                '!' => {
+                    let zero = fb.ins().f64const(0.0);
+                    let boolv = fb.ins().fcmp(FloatCC::Equal, v, zero);
+                    let intv = fb.ins().bint(types::I64, boolv);
+                    fb.ins().fcvt_from_sint(types::F64, intv)
                 }
                 '+' => v,
                 _ => v,
@@ -308,10 +328,17 @@ fn gen_expr(
             iter_var,
             start,
             end,
+            step,
             body,
+            pred,
         } => {
             let start_val = gen_expr(start, fb, ptr, arg_names, module, locals);
             let end_val = gen_expr(end, fb, ptr, arg_names, module, locals);
+            let step_val = if let Some(st) = step {
+                gen_expr(st, fb, ptr, arg_names, module, locals)
+            } else {
+                fb.ins().f64const(1.0)
+            };
             let zero_acc = fb.ins().f64const(0.0);
             let loop_block = fb.create_block();
             let body_block = fb.create_block();
@@ -323,6 +350,7 @@ fn gen_expr(
             fb.switch_to_block(loop_block);
             let i_val = fb.block_params(loop_block)[0];
             let acc_val = fb.block_params(loop_block)[1];
+            // assume positive step; only need simple less-than comparison
             let cond = fb.ins().fcmp(FloatCC::LessThan, i_val, end_val);
             fb.ins().brnz(cond, body_block, &[]);
             fb.ins().jump(exit_block, &[acc_val]);
@@ -330,9 +358,16 @@ fn gen_expr(
             let mut body_locals = locals.clone();
             body_locals.insert(iter_var.clone(), i_val);
             let body_val = gen_expr(body, fb, ptr, arg_names, module, &body_locals);
+            let body_val = if let Some(pred_expr) = pred {
+                let cond_val = gen_expr(pred_expr, fb, ptr, arg_names, module, &body_locals);
+                let zero = fb.ins().f64const(0.0);
+                let mask = fb.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
+                fb.ins().select(mask, body_val, zero)
+            } else {
+                body_val
+            };
             let next_acc = fb.ins().fadd(acc_val, body_val);
-            let one = fb.ins().f64const(1.0);
-            let next_i = fb.ins().fadd(i_val, one);
+            let next_i = fb.ins().fadd(i_val, step_val);
             fb.ins().jump(loop_block, &[next_i, next_acc]);
             fb.seal_block(body_block);
             fb.seal_block(loop_block);

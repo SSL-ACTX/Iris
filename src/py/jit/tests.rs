@@ -44,8 +44,6 @@ fn compile_jit_vector_generator_should_compile() {
     assert_eq!(entry.arg_count, 1);
 }
 
-// remaining tests are copy-pasted from original...
-
 #[test]
 fn compile_jit_math_functions() {
     let args = vec!["x".to_string()];
@@ -165,6 +163,18 @@ fn compile_jit_math_functions() {
         assert_eq!(f(vals.as_ptr()), 12.0);
     }
 
+    #[test]
+    fn compile_jit_range_step_and_predicate() {
+        let entry = compile_jit("sum(i for i in range(0,10,2))", &vec![]).expect("step");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let empty: [f64; 0] = [];
+        assert_eq!(f(empty.as_ptr()), 20.0);
+
+        let entry2 = compile_jit("sum(i for i in range(5) if i % 2 == 0)", &vec![]).expect("pred");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
+        assert_eq!(g(empty.as_ptr()), 6.0);
+    }
+
     #[tokio::test]
     async fn compile_jit_python_api_call_tokio() {
         // same as above but run inside tokio's async test harness
@@ -200,4 +210,71 @@ fn compile_jit_math_functions() {
         let entry3 = compile_jit("x if x < y else y", &args).expect("ternary");
         let h: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry3.func_ptr) };
         assert_eq!(h(vals.as_ptr()), 1.0);
+    }
+
+    #[test]
+    fn compile_jit_boolean_and_or() {
+        let args = vec!["x".to_string(), "y".to_string(), "z".to_string()];
+        let entry = compile_jit("x < y and y < z", &args).expect("and compare");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals_true = [1.0, 2.0, 3.0];
+        let vals_false = [3.0, 2.0, 1.0];
+        assert_eq!(f(vals_true.as_ptr()), 1.0);
+        assert_eq!(f(vals_false.as_ptr()), 0.0);
+
+        let entry2 = compile_jit("x > y or y < z", &args).expect("or compare");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
+        assert_eq!(g(vals_true.as_ptr()), 1.0);
+        assert_eq!(g(vals_false.as_ptr()), 1.0);
+    }
+
+    #[test]
+    fn compile_jit_boolean_not() {
+        let args = vec!["x".to_string(), "y".to_string()];
+        let entry = compile_jit("not x < y", &args).expect("not compare");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals_true = [3.0, 2.0];
+        let vals_false = [1.0, 2.0];
+        assert_eq!(f(vals_true.as_ptr()), 1.0);
+        assert_eq!(f(vals_false.as_ptr()), 0.0);
+    }
+
+    #[test]
+    fn compile_jit_boolean_literals() {
+        let args = vec!["x".to_string(), "y".to_string()];
+
+        let entry = compile_jit("x if True else y", &args).expect("ternary true literal");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals = [3.0, 9.0];
+        assert_eq!(f(vals.as_ptr()), 3.0);
+
+        let entry2 = compile_jit("x if False else y", &args).expect("ternary false literal");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
+        assert_eq!(g(vals.as_ptr()), 9.0);
+    }
+
+    #[test]
+    fn compile_jit_comparison_chain() {
+        let args = vec!["x".to_string(), "y".to_string(), "z".to_string()];
+        let entry = compile_jit("x < y < z", &args).expect("comparison chain");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals_true = [1.0, 2.0, 3.0];
+        let vals_false = [3.0, 2.0, 1.0];
+        assert_eq!(f(vals_true.as_ptr()), 1.0);
+        assert_eq!(f(vals_false.as_ptr()), 0.0);
+    }
+
+    #[test]
+    fn compile_jit_mixed_chain_not_stress() {
+        let args = vec!["x".to_string(), "y".to_string(), "z".to_string()];
+        let entry = compile_jit("not x <= y < z and z >= y", &args).expect("mixed chain/not");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+
+        // x<=y<z is true here, so `not ...` is false; false and true => false
+        let vals_false = [1.0, 2.0, 3.0];
+        assert_eq!(f(vals_false.as_ptr()), 0.0);
+
+        // x<=y<z is false here, so `not ...` is true; true and true => true
+        let vals_true = [3.0, 2.0, 2.0];
+        assert_eq!(f(vals_true.as_ptr()), 1.0);
     }

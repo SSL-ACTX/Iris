@@ -10,6 +10,24 @@ async fn py_jit_offload_decorator_async() {
         let register = module
             .getattr(py, "register_offload")
             .expect("register_offload not present");
+        let cfg_logs = module
+            .getattr(py, "configure_jit_logging")
+            .expect("configure_jit_logging not present");
+        let is_logs = module
+            .getattr(py, "is_jit_logging_enabled")
+            .expect("is_jit_logging_enabled not present");
+
+        // default may come from env; force explicit behavior and verify API.
+        let off: bool = cfg_logs.call1(py, (false, Option::<String>::None)).unwrap().extract(py).unwrap();
+        assert!(!off);
+        let now_off: bool = is_logs.call0(py).unwrap().extract(py).unwrap();
+        assert!(!now_off);
+        let on: bool = cfg_logs.call1(py, (true, Option::<String>::None)).unwrap().extract(py).unwrap();
+        assert!(on);
+        let now_on: bool = is_logs.call0(py).unwrap().extract(py).unwrap();
+        assert!(now_on);
+        // return to env mode for remainder
+        let _: bool = cfg_logs.call1(py, (Option::<bool>::None, Option::<String>::None)).unwrap().extract(py).unwrap();
 
         let locals = PyDict::new(py);
         py.run("def foo(x): return x * 2", None, Some(locals)).unwrap();
@@ -143,6 +161,27 @@ async fn py_jit_offload_decorator_async() {
             .extract(py)
             .unwrap();
         assert_eq!(ret_tern, 1.0);
+
+        // mixed comparison-chain and not stress case
+        py.run("def cmpmix(x,y,z): return 1.0 if (not x <= y < z and z >= y) else 0.0", None, Some(locals)).unwrap();
+        let cmpmix = locals.get_item("cmpmix").unwrap().to_object(py);
+        let _ = register
+            .call1(py, (cmpmix.clone(), Some("jit"), Some("float"),
+                        Some("not x <= y < z and z >= y".to_string()),
+                        Some(vec!["x".to_string(), "y".to_string(), "z".to_string()])))
+            .unwrap();
+        let ret_mix_false: f64 = jitcall
+            .call1(py, (cmpmix.clone(), PyTuple::new(py, &[1.0_f64, 2.0_f64, 3.0_f64]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(ret_mix_false, 0.0);
+        let ret_mix_true: f64 = jitcall
+            .call1(py, (cmpmix, PyTuple::new(py, &[3.0_f64, 2.0_f64, 2.0_f64]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(ret_mix_true, 1.0);
 
         // generator/range loop form
         py.run("def sum_loop(n): return sum(i for i in range(int(n)))", None, Some(locals)).unwrap();

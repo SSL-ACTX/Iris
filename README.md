@@ -7,7 +7,7 @@
 ![License](https://img.shields.io/badge/license-AGPL_3.0-green.svg?style=for-the-badge)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android-lightgrey.svg?style=for-the-badge&logo=linux)
 
-**High-performance, hot-swappable distributed actor mesh for the modern era (with experimental JIT/offload support).**
+**Hybrid distributed runtime fabric for actors, native compute offload, and cross-language services.**
 
 [Features](#-core-capabilities) • [Architecture](#-technical-deep-dive) • [Installation](#-quick-start) • [Usage](#-usage-examples) • [Distributed Mesh](#-the-distributed-mesh)
 
@@ -17,67 +17,75 @@
 
 ## Overview
 
-**Iris** is a distributed actor-model runtime built in Rust with deep **Python** and **Node.js** integration. It is designed for systems that require the extreme concurrency of Erlang, the raw speed of Rust, and the flexibility of high-level scripting languages.
+**Iris** is a hybrid distributed runtime built in Rust with first-class **Python** and **Node.js** bindings.
+It combines three execution styles in one system:
+- an actor mesh for stateful, message-driven workflows,
+- native compute offload/JIT for CPU-heavy hot paths,
+- cross-language runtime APIs for service-oriented applications.
 
-In addition to its core actor mesh, Iris also includes **experimental JIT/offload support for Python**, allowing certain compute-heavy functions to be compiled to native code or dispatched into a specialized actor pool with a simple decorator.
+So Iris is not only an actor runtime—it is a runtime fabric that lets you mix coordination, messaging, and high-performance compute under a single operational model.
 
-Unlike standard message queues, Iris implements a **cooperative reduction-based scheduler**. This allows the runtime to manage millions of actors with microsecond latency, providing built-in fault tolerance, hot code swapping, and location-transparent messaging across a global cluster.
+At its core, Iris uses a **cooperative reduction-based scheduler** for fairness and high concurrency, while providing built-in supervision, hot swapping, discovery, and location-transparent messaging across nodes.
+
+> [!NOTE]
+> Node.js bindings are still in very early phases and are not yet feature-parity with Python.
 
 ## Core Capabilities
 
-### ⚡ Hybrid Actor Model (Push & Pull)
-Iris supports two distinct actor patterns:
-* **Push Actors (Green Threads):** Extremely lightweight. Rust "pushes" messages to a callback only when data arrives.
-* **Pull Actors (OS Threads):** Specialized blocking actors that "pull" messages from a `Mailbox`.
-    * **Python:** Runs in a dedicated OS thread, blocking on `recv()` (releasing the GIL).
+Iris is designed as a hybrid platform, not a single-paradigm engine.
+
+### ⚡ Hybrid Execution Model (Push & Pull)
+Iris provides two complementary execution patterns:
+* **Push Actors (Green Threads):** ultra-lightweight handlers triggered only when messages arrive.
+* **Pull Actors (OS Threads):** blocking mailbox workers for synchronous control flow.
+    * **Python pull actors:** run on dedicated OS threads and block on `recv()` while releasing the GIL.
 
 ### ⚡ Cooperative Reduction Scheduler
-Inspired by the BEAM (Erlang VM), Iris uses a **Cooperative Reduction Scheduler** to ensure system fairness.
-* **Fairness:** Every actor is assigned a "reduction budget". The message processing loop tracks this budget and explicitly yields control back to the Tokio runtime via `yield_now()` once the limit is reached.
-* **No Starvation:** This prevents high-throughput actors from "monopolizing" a CPU core, ensuring all actors in the mesh get a chance to process their mailboxes.
+Inspired by the BEAM (Erlang VM), Iris uses a cooperative reduction scheduler for fairness.
+* **Reduction budgets:** each actor gets a budget, then yields to Tokio via `yield_now()` when it is exhausted.
+* **Starvation resistance:** no single high-throughput actor can monopolize a core.
 
 ### 🔄 Atomic Hot-Code Swapping
-Update your application logic while it is running.
-* **Zero Downtime:** Swap out a Python handler or a Node.js function in memory without stopping the actor or losing its mailbox state.
-* **Safe Transition:** Future messages are processed by the new logic instantly; current messages finish processing under the old logic.
+Update live application logic without stopping the runtime.
+* **Zero downtime:** replace Python or Node.js handlers in memory without losing mailbox state.
+* **Safe transition:** in-flight work completes on old logic; new messages use new logic.
 
 ### 🌐 Global Service Discovery (Phase 7 Enhanced)
-Actors are first-class citizens of the network.
-* **Name Registry:** Register actors with human-readable strings (e.g., `"auth-provider"`) using `register`/`unregister` and look them up via `whereis`.
-* **Async Discovery:** Resolve remote service PIDs using native `await` (Python) or Promises (Node.js) without blocking the runtime.
-* **Location Transparency:** Send messages to actors whether they reside on the local CPU or a server across the globe.
+Actors are first-class network services.
+* **Name registry:** register human-readable names (for example, `"auth-provider"`) with `register`/`unregister` and resolve with `whereis`.
+* **Async discovery:** resolve remote service PIDs with Python `await` or Node.js Promises without blocking runtime progress.
+* **Location transparency:** message actors the same way whether local or remote.
 
 ### 🛡️ Distributed Supervision & Self-Healing
-Built-in fault tolerance modeled after the "Let it Crash" philosophy.
-* **Heartbeat Monitoring:** The mesh automatically sends `PING`/`PONG` signals (0x02/0x03) to detect silent failures (e.g., GIL freezes or half-open TCP connections).
-* **Structured System Messages:** Actor exits, hot-swaps, and heartbeats are delivered as System Messages, providing rich context for supervisor logic.
-* **Self-Healing Factories:** Define closures that automatically re-resolve and restart connections when a remote node comes back online.
+Built-in fault tolerance follows the “Let it Crash” model.
+* **Heartbeat monitoring:** automatic `PING`/`PONG` (0x02/0x03) detects silent failures such as GIL stalls and half-open links.
+* **Structured system messages:** exits, hot swaps, and heartbeats are surfaced as system events for supervisors.
+* **Self-healing factories:** restart logic can re-resolve and reconnect automatically when remote nodes recover.
 
-### 🧠 Experimental JIT / Compute Offload
-A new Python decorator (`@iris.offload`) lets you mark pure‑math or CPU‑bound functions for execution outside the interpreter. Under the hood the runtime either compiles the function to native code via Cranelift or routes calls to a dedicated Rust actor pool, bypassing the GIL and dramatically speeding up hot paths. This feature is still alpha and may change.
-The JIT currently understands a modest subset of expressions and
-performs lightweight optimizations via an internal heuristics pass:
-* numeric literals, variables and the four basic binary ops (`+ - * /`),
-  plus floating-point remainder (`%`).
-* constant folding and algebraic simplifications (e.g. `x*1 => x`, `2+2 => 4`).
-* ternary expressions with constant conditions are evaluated at compile time.
-* simple loop‑reductions such as `sum(i for i in range(5))` are folded to a
-  constant.
-* linear‑body loops like `sum(2*i+3 for i in range(n))` are rewritten into
-  simpler forms (`2*sum(i)+3*n`) and may collapse entirely when bounds are
-  constant.
-* unary `-`/`+`
-* loop-style reductions via `sum(expr for i in range(n))` and
-    `sum(expr for i in range(start, end))`.
-* named constants `pi` and `e` are recognised.
-* simple calls to C math library functions — trigonometric (`sin`, `cos`, `tan`),
-  exponentials and logs (`exp`, `log`), hyperbolics (`sinh`, `cosh`, `tanh`),
-  roots (`sqrt`), power (`pow`), and the like.  Names may be prefixed (`math.sin`)
-  and the prefix is stripped automatically.  The convenience name `abs` maps to
-  `fabs`.  Any other symbol with a compatible prototype (one or two `float` args
-  returning `float`) will also link through.
+### 🧠 Experimental JIT & Compute Offload
+A Python decorator (`@iris.offload`) marks CPU-heavy functions for native execution.
+Under the hood Iris either:
+- compiles expression bodies to machine code via Cranelift (`strategy="jit"`), or
+- routes calls to a dedicated Rust actor pool (`strategy="actor"`).
 
-  Arguments are comma-separated.
+Current JIT support (concise):
+- **Arithmetic:** `+ - * / % **`, unary `+/-`, constants `pi/e`.
+- **Logic:** `and`, `or`, `not`, boolean literals `True/False`.
+- **Comparisons:** `< > <= >= == !=`, including chained comparisons (`a < b < c`).
+- **Conditionals:** Python ternary (`a if cond else b`).
+- **Loops:** `sum(expr for i in range(...))`, with optional `step` and `if` predicate,
+    plus container form `sum(expr for x_i in x)` via wrapper vectorization.
+- **Math calls:** `sin cos tan sinh cosh tanh exp log sqrt pow abs`, and `math.*` variants.
+
+Optimizer highlights:
+- constant folding + algebraic simplification,
+- closed-form rewrites for common linear/quadratic range sums,
+- safe constant evaluation for many bounded loop cases,
+- automatic fallback to Python when compilation is not possible.
+
+Logging is environment-aware and runtime-configurable:
+- env mode: `IRIS_JIT_LOG=1` enables Rust-side JIT debug logs,
+- Python API: `iris.jit.set_jit_logging(...)` and `iris.jit.get_jit_logging()`.
 
 > [!NOTE] 
 > Cranelift’s JIT backend historically relied on x86_64‑only PLT support. When running on
@@ -90,13 +98,13 @@ performs lightweight optimizations via an internal heuristics pass:
 ## Technical Deep Dive
 
 ### The Actor Lifecycle
-Iris actors are extremely lightweight, but the implementation differs by type:
+Iris actor internals vary by execution pattern:
 
-1. **Push Actors:** Purely state-machine driven. They consume ~2KB of RAM and exist only as futures in the Tokio runtime.
-2. **Pull Actors (Python):** Allocated a dedicated stack and OS thread (via Tokio's blocking pool). They are heavier but allow for straightforward, blocking, synchronous logic without "colored functions" (async/await).
+1. **Push actors:** state-machine driven futures in Tokio, typically ~2KB each.
+2. **Pull actors (Python):** dedicated blocking threads with higher footprint but simpler synchronous flow.
 
 ### Distributed Mesh Protocol
-Iris uses a proprietary length-prefixed binary protocol over TCP for inter-node communication.
+Iris uses a length-prefixed binary TCP protocol for inter-node communication.
 
 | Packet Type | Function | Payload Structure |
 | :--- | :--- | :--- |
@@ -106,10 +114,10 @@ Iris uses a proprietary length-prefixed binary protocol over TCP for inter-node 
 | `0x03` | **Heartbeat (Pong)** | `[Empty]` — Acknowledge health |
 
 ### Memory Safety & FFI
-Iris bridges the gap between Rust’s memory safety and dynamic languages using **PyO3** (Python) and **N-API** (Node.js):
-* **Membrane Hardening:** The runtime uses `block_in_place` and `ThreadSafeFunction` queues to safely handle synchronous calls from within asynchronous Rust contexts.
-* **GIL Management:** * Python `recv()` calls release the GIL, allowing other threads to run in parallel while the actor waits for messages.
-* **Atomic RwLocks:** Actor behaviors are protected by thread-safe pointer swaps, ensuring hot-swapping is thread-safe.
+Iris bridges Rust safety with dynamic-language ergonomics through **PyO3** (Python) and **N-API** (Node.js):
+* **Membrane hardening:** uses `block_in_place` and `ThreadSafeFunction` queues for safe sync/async boundaries.
+* **GIL management:** Python `recv()` releases the GIL so other Python threads can continue running.
+* **Atomic RwLocks:** behavior pointers are swapped safely for thread-safe hot swapping.
 
 ---
 
@@ -151,7 +159,7 @@ npm run build
 
 ## Usage Examples
 
-### 🧠 Experimental JIT & Offload (Python only)
+### 🧠 Experimental JIT & Compute Offload (Python only)
 ```python
 import iris
 rt = iris.Runtime()
@@ -167,34 +175,28 @@ print(result)  # 3.7416573867739416
 ```
 
 > [!NOTE] 
-> The offload API also supports `strategy="actor"` for routing to a dedicated compute pool; consult `iris.JIT.md` for details.
+> The offload API also supports `strategy="actor"` for routing to a dedicated compute pool; see `JIT.md` for lower-level internals.
 
-Currently supported JIT expression features include:
-- arithmetic: `+`, `-`, `*`, `/`, `%`, `**`
-- unary operators: `+x`, `-x`
-- loop reductions: `sum(expr for i in range(n))`, `sum(expr for i in range(start, end))`, **and**
-  `sum(expr for var in container)` where `container` is a buffer-supporting
-  argument.  In the latter case the JIT generates a scalar function for the
-  loop body; the Python wrapper automatically vectorizes it over the supplied
-  buffer and returns the sum of results.
+#### JIT Capability Snapshot
+- Arithmetic + power: `+ - * / % **`, unary `+/-`
+- Booleans: `and/or/not`, `True/False`
+- Comparisons: `< > <= >= == !=`, including chains (`x < y < z`)
+- Conditionals: `a if cond else b`
+- Loops: `sum(...)` over `range(...)` (with step/predicate) and container generators
+- Math: `sin cos tan sinh cosh tanh exp log sqrt pow abs`, including `math.*`
 
-  * the JIT applies a heuristics pass that constantly folds any range with
-    fixed bounds, pulls variable coefficients outside the loop, and even
-    rewrites linear/quadratic bodies into closed‑form formulas (e.g.
-    `sum(i*i for i in range(n))` becomes `(n-1)*n*(2n-1)/6`).
+#### Optimizer Behavior
+- Constant folding + simplification (including boolean/relation folding)
+- Loop rewrites for common linear/quadratic forms
+- Constant-bound loop evaluation when safe
+- Exponent shortcuts (`x**0.5 -> sqrt(x)`, `x**-1 -> 1.0/x`)
 
-> **Fallback behaviour:** when JIT compilation fails (unsupported syntax,
-> missing range, etc.) the offload decorator simply runs the original Python
-> function rather than raising an error.  This makes `[email protected]` safe to leave
-> in production code — the function will “auto‑fallback” to the interpreter or
-> actor pool without crashing your program.
-- math calls: `sin`, `cos`, `tan`, `exp`, `log`, `sqrt`, `pow`, `abs`,
-  `sinh`, `cosh`, `tanh`
-- constants: `pi`, `e`
-- comparisons: `<`, `>`, `<=`, `>=`, `==`, `!=` (returning `1.0` or `0.0`)
-- Python ternary expressions: `a if cond else b`
-
-The JIT also applies lightweight exponent rewrites for common cases (e.g. `x ** 0.5` becomes `sqrt(x)`, and `x ** -1` becomes `1.0 / x`) to cut `pow` call overhead.
+#### Fallback + Logging
+- JIT compile failure auto-falls back to normal Python execution.
+- Enable logs by env: `IRIS_JIT_LOG=1`.
+- Control at runtime from Python:
+    - `iris.jit.set_jit_logging(True|False|None, env_var=None)`
+    - `iris.jit.get_jit_logging()`
 
 Iris provides a unified API across both supported languages.
 

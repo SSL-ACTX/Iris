@@ -9,6 +9,8 @@
 #![allow(non_local_definitions)]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI8, Ordering};
+use std::sync::{OnceLock, RwLock};
 
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
@@ -25,6 +27,43 @@ pub(crate) mod heuristics;
 
 // re-export helpers for convenience within this module
 use crate::py::jit::codegen::{compile_jit, register_jit, lookup_jit, execute_jit_func};
+
+static JIT_LOG_OVERRIDE: AtomicI8 = AtomicI8::new(-1); // -1 env, 0 off, 1 on
+static JIT_LOG_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+
+fn jit_log_env_var() -> &'static RwLock<String> {
+    JIT_LOG_ENV_VAR.get_or_init(|| RwLock::new("IRIS_JIT_LOG".to_string()))
+}
+
+fn parse_bool_env(v: &str) -> bool {
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on" | "debug"
+    )
+}
+
+pub(crate) fn jit_logging_enabled() -> bool {
+    match JIT_LOG_OVERRIDE.load(Ordering::Relaxed) {
+        0 => false,
+        1 => true,
+        _ => {
+            let env_name = jit_log_env_var().read().unwrap().clone();
+            std::env::var(env_name)
+                .ok()
+                .map(|v| parse_bool_env(&v))
+                .unwrap_or(false)
+        }
+    }
+}
+
+pub(crate) fn jit_log<F>(msg: F)
+where
+    F: FnOnce() -> String,
+{
+    if jit_logging_enabled() {
+        eprintln!("{}", msg());
+    }
+}
 
 // Offload actor pool ---------------------------------------------------------
 
@@ -92,7 +131,29 @@ pub(crate) fn init_py(m: &PyModule) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(register_offload, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(offload_call, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(call_jit, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(configure_jit_logging, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(is_jit_logging_enabled, m)?)?;
     Ok(())
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn configure_jit_logging(enabled: Option<bool>, env_var: Option<String>) -> PyResult<bool> {
+    if let Some(name) = env_var {
+        *jit_log_env_var().write().unwrap() = name;
+    }
+    match enabled {
+        Some(true) => JIT_LOG_OVERRIDE.store(1, Ordering::Relaxed),
+        Some(false) => JIT_LOG_OVERRIDE.store(0, Ordering::Relaxed),
+        None => JIT_LOG_OVERRIDE.store(-1, Ordering::Relaxed),
+    }
+    Ok(jit_logging_enabled())
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn is_jit_logging_enabled() -> PyResult<bool> {
+    Ok(jit_logging_enabled())
 }
 
 /// Register a Python function for offloading.
@@ -113,17 +174,19 @@ fn register_offload(
                 if let Some(entry) = compile_jit(&expr, &args) {
                     let key = func.as_ptr() as usize;
                     register_jit(key, entry);
-                    eprintln!("[Iris][jit] compiled JIT for function ptr={}", key);
+                    jit_log(|| format!("[Iris][jit] compiled JIT for function ptr={}", key));
                 } else {
-                    eprintln!("[Iris][jit] failed to compile expr: {}", expr);
+                    jit_log(|| format!("[Iris][jit] failed to compile expr: {}", expr));
                 }
             }
         }
     }
-    eprintln!(
-        "[Iris][jit] register_offload called strategy={:?} return_type={:?} source={:?} args={:?}",
-        strategy, return_type, source_expr, arg_names
-    );
+    jit_log(|| {
+        format!(
+            "[Iris][jit] register_offload called strategy={:?} return_type={:?} source={:?} args={:?}",
+            strategy, return_type, source_expr, arg_names
+        )
+    });
     Ok(func)
 }
 
