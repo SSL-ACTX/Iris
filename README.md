@@ -200,6 +200,8 @@ print(result)  # 3.7416573867739416
 
 Iris provides a unified API across both supported languages.
 
+---
+
 ### 1. High-Performance Push Actors (Recommended)
 
 Use `spawn` for maximum throughput (100k+ actors). Rust owns the scheduling and only invokes the guest language when a message arrives.
@@ -278,6 +280,33 @@ const sagaCoordinator = async (mailbox) => {
 
 rt.spawnWithMailbox(sagaCoordinator, 100);
 
+```
+
+### 🔧 Persistent Worker Pool (Python)
+For high-throughput workloads you can pre-spawn a pool of long-lived child actors and
+round‑robin work across them instead of repeatedly spawning new actors. This avoids
+allocation and teardown overhead, giving near-linear scaling when each message performs
+heavy native work (e.g. JIT offloaded math).
+
+```python
+import iris
+
+rt = iris.Runtime()
+
+# spawn a reusable pool attached to a parent PID (useful for supervision)
+parent = rt.spawn(lambda m: None)              # dummy parent
+workers = iris.spawn_child_pool(rt, parent, size=4)
+
+# `workers` is a list of PIDs. use in a simple round‑robin loop:
+from itertools import cycle
+worker_cycle = cycle(workers)
+
+def dispatch(price, vol, strike):
+    pid = next(worker_cycle)
+    # regular send is automatically optimized internally
+    rt.send(pid, serialize_args(price, vol, strike))
+
+# each worker's handler can call into JIT or Python directly
 ```
 
 ### 3. Structured Concurrency

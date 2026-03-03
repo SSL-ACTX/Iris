@@ -846,6 +846,12 @@ impl Runtime {
     }
 
     /// Send user bytes with a fast path that avoids wrapping in `Message` at callsite.
+    /// Internal helper that sends raw bytes to an actor mailbox.
+    ///
+    /// This exists purely for performance; the public `send` API already
+    /// routes through this path automatically.  It is **not** exposed to the
+    /// Python bindings and is hidden from generated documentation.
+    #[doc(hidden)]
     pub fn send_user(&self, pid: Pid, bytes: bytes::Bytes) -> Result<(), bytes::Bytes> {
         if let Some(sender) = self.mailboxes.get(&pid) {
             sender.send_user_bytes(bytes)
