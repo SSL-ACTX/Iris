@@ -78,7 +78,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
             @functools.wraps(func)
             def jit_wrapper(*args: Any, **kwargs: Any) -> Any:
                 try:
-                    return call_jit(func, args, kwargs)
+                    res = call_jit(func, args, kwargs)
                 except RuntimeError as e:
                     # common failure when JIT entry is missing; fall back to
                     # executing the original Python function.  This keeps the
@@ -87,6 +87,18 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                     if "no JIT entry" in msg or "failed to compile" in msg:
                         return func(*args, **kwargs)
                     raise
+                # If JIT returned a sequence (vectorized run), sum the
+                # elements to preserve the semantics of a generator sum.
+                try:
+                    # try treating result as iterable of floats
+                    if hasattr(res, "__iter__") and not isinstance(res, (float, int)):
+                        total = 0.0
+                        for v in res:
+                            total += float(v)
+                        return total
+                except Exception:
+                    pass
+                return res
             return jit_wrapper
 
         return func

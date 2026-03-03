@@ -2,23 +2,6 @@
 //! Expression AST and Pratt parser used by the JIT compiler.
 
 
-/// Simple expression AST for compiler.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Expr {
-    Const(f64),
-    Var(String),
-    BinOp(Box<Expr>, String, Box<Expr>),
-    Call(String, Vec<Expr>),
-    UnaryOp(char, Box<Expr>),
-    Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
-    SumFor {
-        iter_var: String,
-        start: Box<Expr>,
-        end: Box<Expr>,
-        body: Box<Expr>,
-    },
-}
-
 /// Tokenizes a short expression string into individual symbols.
 pub fn tokenize(expr: &str) -> Vec<String> {
     let mut tokens = Vec::new();
@@ -67,6 +50,29 @@ pub fn tokenize(expr: &str) -> Vec<String> {
         tokens.push(cur);
     }
     tokens
+}
+
+/// Simple expression AST for compiler.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    Const(f64),
+    Var(String),
+    BinOp(Box<Expr>, String, Box<Expr>),
+    Call(String, Vec<Expr>),
+    UnaryOp(char, Box<Expr>),
+    Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
+    SumFor {
+        iter_var: String,
+        start: Box<Expr>,
+        end: Box<Expr>,
+        body: Box<Expr>,
+    },
+    /// generator over a runtime container (e.g. Python list/ndarray)
+    SumOver {
+        iter_var: String,
+        container: Box<Expr>,
+        body: Box<Expr>,
+    },
 }
 
 /// Pratt parser implementation with exponent precedence and comparisons.
@@ -213,36 +219,48 @@ impl Parser {
                             if in_kw != "in" {
                                 return None;
                             }
-                            let range_kw = self.next()?;
-                            if range_kw != "range" {
-                                return None;
-                            }
-                            let open = self.next()?;
-                            if open != "(" {
-                                return None;
-                            }
-                            let first = self.parse_expr()?;
-                            let (start, end) = if matches!(self.peek(), Some(",")) {
-                                self.next(); // comma
-                                let second = self.parse_expr()?;
-                                (first, second)
+                            // look ahead to see if this is a range() or a container
+                            if matches!(self.peek(), Some("range")) {
+                                let range_kw = self.next()?;
+                                let open = self.next()?;
+                                if open != "(" {
+                                    return None;
+                                }
+                                let first = self.parse_expr()?;
+                                let (start, end) = if matches!(self.peek(), Some(",")) {
+                                    self.next(); // comma
+                                    let second = self.parse_expr()?;
+                                    (first, second)
+                                } else {
+                                    (Expr::Const(0.0), first)
+                                };
+                                if !matches!(self.peek(), Some(")")) {
+                                    return None;
+                                }
+                                self.next(); // inner ')'
+                                if !matches!(self.peek(), Some(")")) {
+                                    return None;
+                                }
+                                self.next(); // outer ')'
+                                return Some(Expr::SumFor {
+                                    iter_var,
+                                    start: Box::new(start),
+                                    end: Box::new(end),
+                                    body: Box::new(body_expr),
+                                });
                             } else {
-                                (Expr::Const(0.0), first)
-                            };
-                            if !matches!(self.peek(), Some(")")) {
-                                return None;
+                                // container form: parse single expr for container
+                                let container = self.parse_expr()?;
+                                if !matches!(self.peek(), Some(")")) {
+                                    return None;
+                                }
+                                self.next(); // closing ')'
+                                return Some(Expr::SumOver {
+                                    iter_var,
+                                    container: Box::new(container),
+                                    body: Box::new(body_expr),
+                                });
                             }
-                            self.next(); // inner ')'
-                            if !matches!(self.peek(), Some(")")) {
-                                return None;
-                            }
-                            self.next(); // outer ')'
-                            return Some(Expr::SumFor {
-                                iter_var,
-                                start: Box::new(start),
-                                end: Box::new(end),
-                                body: Box::new(body_expr),
-                            });
                         } else {
                             let mut args = vec![body_expr];
                             while let Some(p) = self.peek() {

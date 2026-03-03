@@ -80,9 +80,24 @@ pub fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
     let mut parser = crate::py::jit::parser::Parser::new(tokens);
     let mut expr = parser.parse_expr()?;
     eprintln!("[Iris][jit] parsed AST for '{}': {:?}", expr_str, expr);
+    // detect generator-style loop over a container and convert to body-only
+    // expression.  Python wrapper will pass the container buffer and the
+    // JIT runtime will vectorize across it; the compiled function gets a
+    // single scalar argument representing each element.
+    let mut adjusted_args = arg_names.to_vec();
+    // use a cloned copy when destructuring to release borrow immediately
+    if let Expr::SumOver { iter_var, container, body } = expr.clone() {
+        if let Expr::Var(ref cont_name) = *container {
+            if adjusted_args.len() == 1 && adjusted_args[0] == *cont_name {
+                eprintln!("[Iris][jit] converting SumOver '{}' in {}", iter_var, cont_name);
+                expr = (*body.clone());
+                adjusted_args = vec![iter_var.clone()];
+            }
+        }
+    }
     expr = heuristics::optimize(expr);
     eprintln!("[Iris][jit] optimized AST: {:?}", expr);
-    let arg_count = arg_names.len();
+    let arg_count = adjusted_args.len();
 
     // perform compilation using the thread-local module instance;
     // the closure returns the resulting pointer so we can pass it back.
@@ -285,6 +300,9 @@ fn gen_expr(
             let then_val = gen_expr(then_expr, fb, ptr, arg_names, module, locals);
             let else_val = gen_expr(else_expr, fb, ptr, arg_names, module, locals);
             fb.ins().select(cond_bool, then_val, else_val)
+        }
+        Expr::SumOver { .. } => {
+            panic!("SumOver should have been transformed before codegen");
         }
         Expr::SumFor {
             iter_var,

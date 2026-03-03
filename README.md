@@ -172,7 +172,12 @@ print(result)  # 3.7416573867739416
 Currently supported JIT expression features include:
 - arithmetic: `+`, `-`, `*`, `/`, `%`, `**`
 - unary operators: `+x`, `-x`
-- loop reductions: `sum(expr for i in range(n))`, `sum(expr for i in range(start, end))`
+- loop reductions: `sum(expr for i in range(n))`, `sum(expr for i in range(start, end))`, **and**
+  `sum(expr for var in container)` where `container` is a buffer-supporting
+  argument.  In the latter case the JIT generates a scalar function for the
+  loop body; the Python wrapper automatically vectorizes it over the supplied
+  buffer and returns the sum of results.
+
   * the JIT applies a heuristics pass that constantly folds any range with
     fixed bounds, pulls variable coefficients outside the loop, and even
     rewrites linear/quadratic bodies into closed‑form formulas (e.g.

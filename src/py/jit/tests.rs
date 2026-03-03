@@ -36,10 +36,12 @@ fn compile_jit_nested_parens_generator() {
 }
 
 #[test]
-fn compile_jit_vector_generator_should_fail() {
+fn compile_jit_vector_generator_should_compile() {
     let args = vec!["x".to_string()];
-    let entry = compile_jit("sum((x_i * x_i for x_i in x))", &args);
-    assert!(entry.is_none(), "vector generator must not compile");
+    let entry = compile_jit("sum((x_i * x_i for x_i in x))", &args)
+        .expect("vector generator should now compile");
+    // entry.arg_count should equal 1 (element argument)
+    assert_eq!(entry.arg_count, 1);
 }
 
 // remaining tests are copy-pasted from original...

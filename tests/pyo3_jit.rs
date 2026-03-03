@@ -158,8 +158,10 @@ async fn py_jit_offload_decorator_async() {
             .unwrap();
         assert_eq!(ret_loop, 10.0);
 
-        // check python-side wrapper fallback when JIT compilation fails
+        // formerly this generator failed; now it compiles and the wrapper
+        // will vectorize & sum the results across the buffer
         py.run(r#"
+import iris
 @iris.offload(strategy='jit', return_type='float')
 def bad(x):
     return sum((x_i * x_i for x_i in x))
