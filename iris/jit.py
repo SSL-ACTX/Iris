@@ -15,11 +15,44 @@ import warnings
 from typing import Callable, Optional, Any
 
 try:
-    from .iris import register_offload, offload_call, call_jit  # pyo3 extension
+    from .iris import (
+        register_offload,
+        offload_call,
+        call_jit,
+        configure_jit_logging,
+        is_jit_logging_enabled,
+    )  # pyo3 extension
 except ImportError:  # allow tests to import without extension built
     register_offload = None  # type: ignore
     offload_call = None  # type: ignore
     call_jit = None  # type: ignore
+    configure_jit_logging = None  # type: ignore
+    is_jit_logging_enabled = None  # type: ignore
+
+
+def set_jit_logging(enabled: Optional[bool] = None, env_var: Optional[str] = None) -> bool:
+    """Configure low-level Rust JIT logging.
+
+    Parameters
+    ----------
+    enabled:
+        - ``True``: force logs on
+        - ``False``: force logs off
+        - ``None``: use environment variable mode
+    env_var:
+        Environment variable name to read when ``enabled`` is ``None``.
+        Default is ``IRIS_JIT_LOG``.
+    """
+    if configure_jit_logging is None:
+        return False
+    return bool(configure_jit_logging(enabled, env_var))
+
+
+def get_jit_logging() -> bool:
+    """Return whether Rust JIT logging is currently enabled."""
+    if is_jit_logging_enabled is None:
+        return False
+    return bool(is_jit_logging_enabled())
 
 
 def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -77,7 +110,28 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
         elif strategy == "jit" and call_jit is not None:
             @functools.wraps(func)
             def jit_wrapper(*args: Any, **kwargs: Any) -> Any:
-                return call_jit(func, args, kwargs)
+                try:
+                    res = call_jit(func, args, kwargs)
+                except RuntimeError as e:
+                    # common failure when JIT entry is missing; fall back to
+                    # executing the original Python function.  This keeps the
+                    # decorator non‑fatal when compilation is not possible.
+                    msg = str(e)
+                    if "no JIT entry" in msg or "failed to compile" in msg:
+                        return func(*args, **kwargs)
+                    raise
+                # If JIT returned a sequence (vectorized run), sum the
+                # elements to preserve the semantics of a generator sum.
+                try:
+                    # try treating result as iterable of floats
+                    if hasattr(res, "__iter__") and not isinstance(res, (float, int)):
+                        total = 0.0
+                        for v in res:
+                            total += float(v)
+                        return total
+                except Exception:
+                    pass
+                return res
             return jit_wrapper
 
         return func
