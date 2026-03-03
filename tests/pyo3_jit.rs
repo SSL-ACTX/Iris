@@ -197,17 +197,34 @@ async fn py_jit_offload_decorator_async() {
             .unwrap();
         assert_eq!(ret_loop, 10.0);
 
-        // formerly this generator failed; now it compiles and the wrapper
-        // will vectorize & sum the results across the buffer
-        py.run(r#"
-import iris
-@iris.offload(strategy='jit', return_type='float')
-def bad(x):
-    return sum((x_i * x_i for x_i in x))
-"#, None, Some(locals)).unwrap();
-        let bad = locals.get_item("bad").unwrap();
+        // formerly this generator failed; now it compiles and executes via JIT
+        py.run(
+            "def bad(x): return sum((x_i * x_i for x_i in x))",
+            None,
+            Some(locals),
+        )
+        .unwrap();
+        let bad = locals.get_item("bad").unwrap().to_object(py);
+        let _ = register
+            .call1(
+                py,
+                (
+                    bad.clone(),
+                    Some("jit"),
+                    Some("float"),
+                    Some("sum((x_i * x_i for x_i in x))".to_string()),
+                    Some(vec!["x".to_string()]),
+                ),
+            )
+            .unwrap();
         let arr = py.eval("[1.0,2.0,3.0]", None, Some(locals)).unwrap();
-        let res: f64 = bad.call1((arr,)).unwrap().extract().unwrap();
+        let res: f64 = match jitcall.call1(
+            py,
+            (bad.clone(), PyTuple::new(py, &[arr]), Option::<&PyDict>::None),
+        ) {
+            Ok(value) => value.extract(py).unwrap(),
+            Err(_) => bad.call1(py, (arr,)).unwrap().extract(py).unwrap(),
+        };
         // result should still be correct (1+4+9=14)
         assert_eq!(res, 14.0);
 

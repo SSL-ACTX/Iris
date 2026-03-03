@@ -32,14 +32,13 @@ async fn test_path_supervisor_restart_one() {
 
         // Python factory that spawns a new observed actor under same path
         let locals = pyo3::types::PyDict::new(py);
+        locals.set_item("rt", rt).unwrap();
         py.run(
             r#"
 def factory():
-    import iris
-    rt = iris.PyRuntime()
     return rt.spawn_with_path_observed(10, "/svc/restart/one")
 "#,
-            None,
+            Some(locals),
             Some(locals),
         )
         .unwrap();
