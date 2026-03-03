@@ -663,12 +663,23 @@ impl Runtime {
         RUNTIME.spawn(async move {
             let h_loop = handler.clone();
             let actor_handle = tokio::spawn(async move {
-                let mut processed = 0;
-                while let Some(msg) = rx.recv().await {
+                let mut processed = 0usize;
+                while let Some(first_msg) = rx.recv().await {
                     let h = h_loop.clone();
-                    (h)(msg).await;
-                    
+                    (h)(first_msg).await;
                     processed += 1;
+
+                    while processed < budget {
+                        match rx.try_recv() {
+                            Some(next_msg) => {
+                                let h = h_loop.clone();
+                                (h)(next_msg).await;
+                                processed += 1;
+                            }
+                            None => break,
+                        }
+                    }
+
                     if processed >= budget {
                         processed = 0;
                         tokio::task::yield_now().await;
@@ -754,6 +765,12 @@ impl Runtime {
                         let mut guard = v_clone.lock().unwrap();
                         guard.push(msg);
                     }
+
+                    while let Some(next_msg) = rx.try_recv() {
+                        let mut guard = v_clone.lock().unwrap();
+                        guard.push(next_msg);
+                    }
+
                     tokio::task::yield_now().await;
                 }
             });

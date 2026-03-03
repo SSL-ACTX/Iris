@@ -117,12 +117,12 @@ impl MailboxSender {
             Message::User(b) => {
                 // increment counter before enqueue attempt
                 self.counter.fetch_add(1, Ordering::SeqCst);
-                let backup = Message::User(b.clone());
                 let res = match &self.tx_user {
-                    UserSender::Unbounded(tx) => tx.send(b).map_err(|_| backup.clone()),
+                    UserSender::Unbounded(tx) => tx.send(b).map_err(|e| Message::User(e.0)),
                     UserSender::Bounded(tx) => match tx.try_send(b) {
                         Ok(()) => Ok(()),
-                        Err(_e) => Err(backup.clone()),
+                        Err(mpsc::error::TrySendError::Full(b)) => Err(Message::User(b)),
+                        Err(mpsc::error::TrySendError::Closed(b)) => Err(Message::User(b)),
                     },
                 };
                 if res.is_err() {
@@ -132,10 +132,9 @@ impl MailboxSender {
                 res
             }
             Message::System(s) => {
-                let backup = Message::System(s.clone());
                 match self.tx_sys.send(s) {
                     Ok(()) => Ok(()),
-                    Err(_) => Err(backup),
+                    Err(e) => Err(Message::System(e.0)),
                 }
             }
         }
@@ -144,14 +143,13 @@ impl MailboxSender {
     /// Convenience: send user bytes directly.
     pub fn send_user_bytes(&self, b: Bytes) -> Result<(), Bytes> {
         self.counter.fetch_add(1, Ordering::SeqCst);
-        let backup = b.clone();
         let res = match &self.tx_user {
-            UserSender::Unbounded(tx) => tx.send(b).map_err(|_e| backup.clone()),
+            UserSender::Unbounded(tx) => tx.send(b).map_err(|e| e.0),
             UserSender::Bounded(tx) => match tx.try_send(b) {
                 Ok(()) => Ok(()),
                 Err(err) => match err {
-                    mpsc::error::TrySendError::Full(_) => Err(backup.clone()),
-                    mpsc::error::TrySendError::Closed(_) => Err(backup.clone()),
+                    mpsc::error::TrySendError::Full(b) => Err(b),
+                    mpsc::error::TrySendError::Closed(b) => Err(b),
                 },
             },
         };
@@ -163,10 +161,9 @@ impl MailboxSender {
 
     /// Convenience: send system message directly.
     pub fn send_system(&self, s: SystemMessage) -> Result<(), SystemMessage> {
-        let backup = s.clone();
         match self.tx_sys.send(s) {
             Ok(()) => Ok(()),
-            Err(_) => Err(backup),
+            Err(e) => Err(e.0),
         }
     }
 
