@@ -56,10 +56,13 @@ Built-in fault tolerance modeled after the "Let it Crash" philosophy.
 ### 🧠 Experimental JIT / Compute Offload
 A new Python decorator (`@iris.offload`) lets you mark pure‑math or CPU‑bound functions for execution outside the interpreter. Under the hood the runtime either compiles the function to native code via Cranelift or routes calls to a dedicated Rust actor pool, bypassing the GIL and dramatically speeding up hot paths. This feature is still alpha and may change.
 The JIT currently understands a modest subset of expressions and
-performs lightweight optimizations (e.g. constant folding) via an internal
-heuristics pass:
+performs lightweight optimizations via an internal heuristics pass:
 * numeric literals, variables and the four basic binary ops (`+ - * /`),
   plus floating-point remainder (`%`).
+* constant folding and algebraic simplifications (e.g. `x*1 => x`, `2+2 => 4`).
+* ternary expressions with constant conditions are evaluated at compile time.
+* simple loop‑reductions such as `sum(i for i in range(5))` are folded to a
+  constant.
 * unary `-`/`+`
 * loop-style reductions via `sum(expr for i in range(n))` and
     `sum(expr for i in range(start, end))`.
