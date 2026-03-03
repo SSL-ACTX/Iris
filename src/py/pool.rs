@@ -101,11 +101,18 @@ pub(crate) fn make_release_gil_channel(
     }
 
     static RELEASE_GIL_THREADS: AtomicUsize = AtomicUsize::new(0);
-    const DEFAULT_MAX_RELEASE_GIL_THREADS: usize = 256;
-    const DEFAULT_GIL_POOL_SIZE: usize = 8;
 
     let (max_threads, pool_size) = rt.get_release_gil_limits();
     let strict = rt.is_release_gil_strict();
+
+    // Explicit pooled mode: no dedicated per-actor GIL threads.
+    // This is the preferred mode for high-throughput short-lived actors.
+    if max_threads == 0 {
+        let _ = GIL_WORKER_POOL
+            .get_or_init(|| Arc::new(GilPool::new(pool_size)))
+            .clone();
+        return Ok(None);
+    }
 
     let prev = RELEASE_GIL_THREADS.fetch_add(1, Ordering::SeqCst);
     if prev >= max_threads {
@@ -167,4 +174,25 @@ pub(crate) fn make_release_gil_channel(
         }
     });
     Ok(Some(tx))
+}
+
+#[cfg(all(test, feature = "pyo3"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_threads_zero_forces_shared_pool_even_in_strict_mode() {
+        pyo3::prepare_freethreaded_python();
+
+        let rt = Runtime::new();
+        rt.set_release_gil_limits(0, 1);
+        rt.set_release_gil_strict(true);
+
+        pyo3::Python::with_gil(|py| {
+            let behavior = Arc::new(parking_lot::RwLock::new(py.None().into_py(py)));
+            let ch = make_release_gil_channel(&rt, true, behavior)
+                .expect("max_threads=0 should force shared pool mode without strict error");
+            assert!(ch.is_none());
+        });
+    }
 }

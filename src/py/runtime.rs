@@ -389,6 +389,47 @@ impl PyRuntime {
                             }
                             _ => {}
                         }
+                    } else if release {
+                        match msg {
+                            crate::mailbox::Message::User(bytes) => {
+                                if let Some(pool) = GIL_WORKER_POOL.get() {
+                                    let task = PoolTask::Execute {
+                                        behavior: behavior.clone(),
+                                        bytes: bytes.clone(),
+                                    };
+                                    let _ = pool.sender.send(task);
+                                } else {
+                                    Python::with_gil(|py| {
+                                        let guard = behavior.read();
+                                        let cb = guard.as_ref(py);
+                                        let pybytes = PyBytes::new(py, &bytes);
+                                        if let Err(e) = cb.call1((pybytes,)) {
+                                            eprintln!("[Iris] Python actor exception: {}", e);
+                                            e.print(py);
+                                        }
+                                    });
+                                }
+                            }
+                            crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
+                                if let Some(pool) = GIL_WORKER_POOL.get() {
+                                    let task = PoolTask::HotSwap {
+                                        behavior: behavior.clone(),
+                                        ptr,
+                                    };
+                                    let _ = pool.sender.send(task);
+                                } else {
+                                    Python::with_gil(|py| unsafe {
+                                        let new_obj = PyObject::from_owned_ptr(
+                                            py,
+                                            ptr as *mut pyo3::ffi::PyObject,
+                                        );
+                                        let mut guard = behavior.write();
+                                        *guard = new_obj;
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
                     } else {
                         match msg {
                             crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
@@ -463,6 +504,46 @@ impl PyRuntime {
                         crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
                             let task = PoolTask::HotSwap { behavior: behavior.clone(), ptr };
                             let _ = tx.send(task);
+                        }
+                        _ => {}
+                    }
+                } else if release {
+                    match msg {
+                        crate::mailbox::Message::User(bytes) => {
+                            if let Some(pool) = GIL_WORKER_POOL.get() {
+                                let task = PoolTask::Execute {
+                                    behavior: behavior.clone(),
+                                    bytes: bytes.clone(),
+                                };
+                                let _ = pool.sender.send(task);
+                            } else {
+                                Python::with_gil(|py| {
+                                    let guard = behavior.read();
+                                    let cb = guard.as_ref(py);
+                                    let pybytes = PyBytes::new(py, &bytes);
+                                    if let Err(e) = cb.call1((pybytes,)) {
+                                        eprintln!("[Iris] Python actor exception: {}", e);
+                                        e.print(py);
+                                    }
+                                });
+                            }
+                        }
+                        crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
+                            if let Some(pool) = GIL_WORKER_POOL.get() {
+                                let task = PoolTask::HotSwap {
+                                    behavior: behavior.clone(),
+                                    ptr,
+                                };
+                                let _ = pool.sender.send(task);
+                            } else {
+                                unsafe {
+                                    let new_obj = Python::with_gil(|py| {
+                                        PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject)
+                                    });
+                                    let mut guard = behavior.write();
+                                    *guard = new_obj;
+                                }
+                            }
                         }
                         _ => {}
                     }

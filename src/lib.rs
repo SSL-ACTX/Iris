@@ -84,7 +84,7 @@ impl Runtime {
             path_supervisors: Arc::new(DashMap::new()),
             parent_of: Arc::new(DashMap::new()),
             children_by_parent: Arc::new(DashMap::new()),
-            release_gil_max_threads: Arc::new(Mutex::new(256)),
+            release_gil_max_threads: Arc::new(Mutex::new(0)),
             gil_pool_size: Arc::new(Mutex::new(8)),
             release_gil_strict: Arc::new(Mutex::new(false)),
             timers: Arc::new(Mutex::new(HashMap::new())),
@@ -164,6 +164,8 @@ impl Runtime {
     }
 
     /// Set runtime limits for GIL release handling.
+    ///
+    /// `max_threads = 0` forces pooled mode (no dedicated thread per actor).
     pub fn set_release_gil_limits(&self, max_threads: usize, pool_size: usize) {
         *self.release_gil_max_threads.lock().unwrap() = max_threads;
         *self.gil_pool_size.lock().unwrap() = pool_size;
