@@ -74,6 +74,21 @@ class Runtime:
         """
         return self._inner.spawn_child_py_handler(parent, handler, budget, release_gil)
 
+    def spawn_child_pool(
+        self,
+        parent: int,
+        handler,
+        workers: int,
+        budget: int = 100,
+        release_gil: bool = False,
+    ):
+        """Spawn a persistent pool of child actors tied to `parent`.
+
+        Useful for pipeline workloads to avoid repeated spawn/teardown costs.
+        Returns a list of worker PIDs.
+        """
+        return self._inner.spawn_child_pool(parent, handler, workers, budget, release_gil)
+
     def spawn_child_with_mailbox(self, parent: int, handler, budget: int = 100) -> int:
         """
         Like :meth:`spawn_with_mailbox` but the resulting actor is killed when

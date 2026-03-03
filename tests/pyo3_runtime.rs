@@ -349,3 +349,82 @@ async fn py_structured_concurrency_normal_and_crash() {
     });
     assert!(!alive2, "child should die when parent crashes");
 }
+
+#[tokio::test]
+async fn py_spawn_child_pool_reuses_workers_under_parent() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        let rt_obj = runtime_type.call0().expect("construct PyRuntime");
+        rt_obj.into_py(py)
+    });
+
+    let (parent_pid, worker_pids, lst_obj): (u64, Vec<u64>, pyo3::PyObject) = Python::with_gil(|py| {
+        let rt = rt_py.as_ref(py);
+
+        let parent_pid: u64 = rt
+            .call_method1("spawn_observed_handler", (1usize,))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        let lst = pyo3::types::PyList::empty(py);
+        let locals = pyo3::types::PyDict::new(py);
+        locals.set_item("lst", lst).unwrap();
+        py.run(
+            "def cb(b):\n    lst.append(bytes(b))",
+            Some(locals),
+            Some(locals),
+        )
+        .unwrap();
+        let cb: pyo3::PyObject = locals.get_item("cb").unwrap().into();
+
+        let worker_pids: Vec<u64> = rt
+            .call_method1("spawn_child_pool", (parent_pid, cb, 4usize, 64usize, false))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(worker_pids.len(), 4);
+
+        for (i, pid) in worker_pids.iter().enumerate() {
+            let payload = format!("m{}", i);
+            let ok: bool = rt
+                .call_method1("send", (*pid, pyo3::types::PyBytes::new(py, payload.as_bytes())))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert!(ok);
+        }
+
+        (parent_pid, worker_pids, lst.into_py(py))
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    Python::with_gil(|py| {
+        let lst = lst_obj
+            .as_ref(py)
+            .downcast::<pyo3::types::PyList>()
+            .unwrap();
+        let got: Vec<Vec<u8>> = lst.extract().unwrap();
+        assert_eq!(got.len(), 4);
+    });
+
+    Python::with_gil(|py| {
+        let rt = rt_py.as_ref(py);
+        rt.call_method1("stop", (parent_pid,)).unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+
+    Python::with_gil(|py| {
+        let rt = rt_py.as_ref(py);
+        for pid in worker_pids {
+            let alive: bool = rt.call_method1("is_alive", (pid,)).unwrap().extract().unwrap();
+            assert!(!alive, "worker child should be stopped when parent exits");
+        }
+    });
+}

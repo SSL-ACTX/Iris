@@ -476,6 +476,31 @@ impl PyRuntime {
         self.spawn_child_py_handler(parent, py_callable, bud, release_gil)
     }
 
+    /// Spawn a pool of child actors tied to `parent`.
+    ///
+    /// The returned PIDs are long-lived workers that reuse actor state,
+    /// reducing per-task spawn/teardown overhead for pipeline workloads.
+    fn spawn_child_pool(
+        &self,
+        parent: u64,
+        py_callable: PyObject,
+        workers: usize,
+        budget: usize,
+        release_gil: Option<bool>,
+    ) -> PyResult<Vec<u64>> {
+        let mut out = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let pid = self.spawn_child_py_handler(
+                parent,
+                py_callable.clone(),
+                budget,
+                release_gil,
+            )?;
+            out.push(pid);
+        }
+        Ok(out)
+    }
+
     /// Variant of `spawn_py_handler` that ties the new actor to a `parent` PID.
     /// Structured concurrency: child is automatically stopped when the parent exits.
     fn spawn_child_py_handler(
