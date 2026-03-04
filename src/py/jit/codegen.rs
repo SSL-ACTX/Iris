@@ -16,10 +16,19 @@ use pyo3::AsPyPointer;
 use pyo3::IntoPy;
 
 /// A compiled function entry returned by the JIT.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReductionMode {
+    None,
+    Sum,
+    Any,
+    All,
+}
+
 #[derive(Clone)]
 pub struct JitEntry {
     pub func_ptr: usize,
     pub arg_count: usize,
+    pub reduction: ReductionMode,
 }
 
 static JIT_FUNC_COUNTER: once_cell::sync::Lazy<AtomicUsize> =
@@ -119,6 +128,7 @@ pub fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
     // JIT runtime will vectorize across it; the compiled function gets a
     // single scalar argument representing each element.
     let mut adjusted_args = arg_names.to_vec();
+    let mut reduction = ReductionMode::None;
     // use a cloned copy when destructuring to release borrow immediately
     if let Expr::SumOver { iter_var, container, body, pred } = expr.clone() {
         if let Expr::Var(ref cont_name) = *container {
@@ -132,6 +142,39 @@ pub fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
                     *body.clone()
                 };
                 adjusted_args = vec![iter_var.clone()];
+                reduction = ReductionMode::Sum;
+            }
+        }
+    }
+    if let Expr::AnyOver { iter_var, container, body, pred } = expr.clone() {
+        if let Expr::Var(ref cont_name) = *container {
+            if adjusted_args.len() == 1 && adjusted_args[0] == *cont_name {
+                crate::py::jit::jit_log(|| {
+                    format!("[Iris][jit] converting AnyOver '{}' in {}", iter_var, cont_name)
+                });
+                expr = if let Some(p) = pred {
+                    Expr::Ternary(p, body, Box::new(Expr::Const(0.0)))
+                } else {
+                    *body.clone()
+                };
+                adjusted_args = vec![iter_var.clone()];
+                reduction = ReductionMode::Any;
+            }
+        }
+    }
+    if let Expr::AllOver { iter_var, container, body, pred } = expr.clone() {
+        if let Expr::Var(ref cont_name) = *container {
+            if adjusted_args.len() == 1 && adjusted_args[0] == *cont_name {
+                crate::py::jit::jit_log(|| {
+                    format!("[Iris][jit] converting AllOver '{}' in {}", iter_var, cont_name)
+                });
+                expr = if let Some(p) = pred {
+                    Expr::Ternary(p, body, Box::new(Expr::Const(1.0)))
+                } else {
+                    *body.clone()
+                };
+                adjusted_args = vec![iter_var.clone()];
+                reduction = ReductionMode::All;
             }
         }
     }
@@ -180,6 +223,7 @@ pub fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
         Some(JitEntry {
             func_ptr: code_ptr,
             arg_count,
+            reduction,
         })
     })
 }
@@ -361,6 +405,165 @@ fn gen_expr(
         }
         Expr::SumOver { .. } => {
             panic!("SumOver should have been transformed before codegen");
+        }
+        Expr::AnyOver { .. } => {
+            panic!("AnyOver should have been transformed before codegen");
+        }
+        Expr::AllOver { .. } => {
+            panic!("AllOver should have been transformed before codegen");
+        }
+        Expr::AnyFor {
+            iter_var,
+            start,
+            end,
+            step,
+            body,
+            pred,
+        } => {
+            let start_val = gen_expr(start, fb, ptr, arg_names, module, locals);
+            let end_val = gen_expr(end, fb, ptr, arg_names, module, locals);
+            let step_val = if let Some(st) = step {
+                gen_expr(st, fb, ptr, arg_names, module, locals)
+            } else {
+                fb.ins().f64const(1.0)
+            };
+            let zero = fb.ins().f64const(0.0);
+            let one = fb.ins().f64const(1.0);
+
+            let loop_block = fb.create_block();
+            let body_block = fb.create_block();
+            let short_true_block = fb.create_block();
+            let continue_block = fb.create_block();
+            let exit_block = fb.create_block();
+            fb.append_block_param(loop_block, types::F64); // i
+            fb.append_block_param(loop_block, types::F64); // acc (0/1)
+            fb.append_block_param(continue_block, types::F64); // next acc (0/1)
+            fb.append_block_param(exit_block, types::F64); // result
+            fb.ins().jump(loop_block, &[start_val, zero]);
+
+            fb.switch_to_block(loop_block);
+            let i_val = fb.block_params(loop_block)[0];
+            let acc_val = fb.block_params(loop_block)[1];
+            let step_pos = fb.ins().fcmp(FloatCC::GreaterThan, step_val, zero);
+            let step_neg = fb.ins().fcmp(FloatCC::LessThan, step_val, zero);
+            let cond_lt = fb.ins().fcmp(FloatCC::LessThan, i_val, end_val);
+            let cond_gt = fb.ins().fcmp(FloatCC::GreaterThan, i_val, end_val);
+            let run_pos = fb.ins().band(step_pos, cond_lt);
+            let run_neg = fb.ins().band(step_neg, cond_gt);
+            let cond = fb.ins().bor(run_pos, run_neg);
+            fb.ins().brnz(cond, body_block, &[]);
+            fb.ins().jump(exit_block, &[acc_val]);
+
+            fb.switch_to_block(body_block);
+            let mut body_locals = locals.clone();
+            body_locals.insert(iter_var.clone(), i_val);
+            let body_val = gen_expr(body, fb, ptr, arg_names, module, &body_locals);
+            let body_true = fb.ins().fcmp(FloatCC::NotEqual, body_val, zero);
+            let effective_true = if let Some(pred_expr) = pred {
+                let pred_val = gen_expr(pred_expr, fb, ptr, arg_names, module, &body_locals);
+                let pred_true = fb.ins().fcmp(FloatCC::NotEqual, pred_val, zero);
+                fb.ins().band(pred_true, body_true)
+            } else {
+                body_true
+            };
+            let acc_true = fb.ins().fcmp(FloatCC::NotEqual, acc_val, zero);
+            let next_true = fb.ins().bor(acc_true, effective_true);
+            let next_acc = fb.ins().select(next_true, one, zero);
+            fb.ins().brnz(next_true, short_true_block, &[]);
+            fb.ins().jump(continue_block, &[next_acc]);
+
+            fb.switch_to_block(continue_block);
+            let next_acc = fb.block_params(continue_block)[0];
+            let next_i = fb.ins().fadd(i_val, step_val);
+            fb.ins().jump(loop_block, &[next_i, next_acc]);
+
+            fb.switch_to_block(short_true_block);
+            fb.ins().jump(exit_block, &[one]);
+
+            fb.seal_block(body_block);
+            fb.seal_block(short_true_block);
+            fb.seal_block(continue_block);
+            fb.seal_block(loop_block);
+            fb.switch_to_block(exit_block);
+            fb.seal_block(exit_block);
+            fb.block_params(exit_block)[0]
+        }
+        Expr::AllFor {
+            iter_var,
+            start,
+            end,
+            step,
+            body,
+            pred,
+        } => {
+            let start_val = gen_expr(start, fb, ptr, arg_names, module, locals);
+            let end_val = gen_expr(end, fb, ptr, arg_names, module, locals);
+            let step_val = if let Some(st) = step {
+                gen_expr(st, fb, ptr, arg_names, module, locals)
+            } else {
+                fb.ins().f64const(1.0)
+            };
+            let zero = fb.ins().f64const(0.0);
+            let one = fb.ins().f64const(1.0);
+            let true_mask = fb.ins().fcmp(FloatCC::Equal, zero, zero);
+
+            let loop_block = fb.create_block();
+            let body_block = fb.create_block();
+            let short_false_block = fb.create_block();
+            let continue_block = fb.create_block();
+            let exit_block = fb.create_block();
+            fb.append_block_param(loop_block, types::F64); // i
+            fb.append_block_param(loop_block, types::F64); // acc (0/1)
+            fb.append_block_param(continue_block, types::F64); // next acc (0/1)
+            fb.append_block_param(exit_block, types::F64); // result
+            fb.ins().jump(loop_block, &[start_val, one]);
+
+            fb.switch_to_block(loop_block);
+            let i_val = fb.block_params(loop_block)[0];
+            let acc_val = fb.block_params(loop_block)[1];
+            let step_pos = fb.ins().fcmp(FloatCC::GreaterThan, step_val, zero);
+            let step_neg = fb.ins().fcmp(FloatCC::LessThan, step_val, zero);
+            let cond_lt = fb.ins().fcmp(FloatCC::LessThan, i_val, end_val);
+            let cond_gt = fb.ins().fcmp(FloatCC::GreaterThan, i_val, end_val);
+            let run_pos = fb.ins().band(step_pos, cond_lt);
+            let run_neg = fb.ins().band(step_neg, cond_gt);
+            let cond = fb.ins().bor(run_pos, run_neg);
+            fb.ins().brnz(cond, body_block, &[]);
+            fb.ins().jump(exit_block, &[acc_val]);
+
+            fb.switch_to_block(body_block);
+            let mut body_locals = locals.clone();
+            body_locals.insert(iter_var.clone(), i_val);
+            let body_val = gen_expr(body, fb, ptr, arg_names, module, &body_locals);
+            let body_true = fb.ins().fcmp(FloatCC::NotEqual, body_val, zero);
+            let effective_true = if let Some(pred_expr) = pred {
+                let pred_val = gen_expr(pred_expr, fb, ptr, arg_names, module, &body_locals);
+                let pred_true = fb.ins().fcmp(FloatCC::NotEqual, pred_val, zero);
+                fb.ins().select(pred_true, body_true, true_mask)
+            } else {
+                body_true
+            };
+            let acc_true = fb.ins().fcmp(FloatCC::NotEqual, acc_val, zero);
+            let next_true = fb.ins().band(acc_true, effective_true);
+            let next_acc = fb.ins().select(next_true, one, zero);
+            fb.ins().brz(next_true, short_false_block, &[]);
+            fb.ins().jump(continue_block, &[next_acc]);
+
+            fb.switch_to_block(continue_block);
+            let next_acc = fb.block_params(continue_block)[0];
+            let next_i = fb.ins().fadd(i_val, step_val);
+            fb.ins().jump(loop_block, &[next_i, next_acc]);
+
+            fb.switch_to_block(short_false_block);
+            fb.ins().jump(exit_block, &[zero]);
+
+            fb.seal_block(body_block);
+            fb.seal_block(short_false_block);
+            fb.seal_block(continue_block);
+            fb.seal_block(loop_block);
+            fb.switch_to_block(exit_block);
+            fb.seal_block(exit_block);
+            fb.block_params(exit_block)[0]
         }
         Expr::SumFor {
             iter_var,
@@ -641,6 +844,45 @@ fn store_exec_profile(func_ptr: usize, profile: JitExecProfile) {
     });
 }
 
+#[cfg(feature = "pyo3")]
+#[inline(always)]
+fn reduction_identity(mode: ReductionMode) -> f64 {
+    match mode {
+        ReductionMode::None => 0.0,
+        ReductionMode::Sum => 0.0,
+        ReductionMode::Any => 0.0,
+        ReductionMode::All => 1.0,
+    }
+}
+
+#[cfg(feature = "pyo3")]
+#[inline(always)]
+fn reduction_step(mode: ReductionMode, acc: &mut f64, value: f64) -> bool {
+    match mode {
+        ReductionMode::None => false,
+        ReductionMode::Sum => {
+            *acc += value;
+            false
+        }
+        ReductionMode::Any => {
+            if value != 0.0 {
+                *acc = 1.0;
+                true
+            } else {
+                false
+            }
+        }
+        ReductionMode::All => {
+            if value == 0.0 {
+                *acc = 0.0;
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
 /// Highly optimized helper to execute a JIT compiled function.
 /// Handles zero-copy buffers (including multi-argument vectorization) and scalar argument unpacking via stack.
 #[cfg(feature = "pyo3")]
@@ -705,6 +947,35 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
 
                     if matched {
                         let len = common_len.unwrap_or(0);
+                        if entry.reduction != ReductionMode::None {
+                            let mut acc = reduction_identity(entry.reduction);
+                            const MAX_FAST_ARGS: usize = 8;
+                            if expected <= MAX_FAST_ARGS {
+                                for i in 0..len {
+                                    let mut iter_args = [0.0_f64; MAX_FAST_ARGS];
+                                    for j in 0..expected {
+                                        iter_args[j] = unsafe { read_buffer_f64(&views[j], i) };
+                                    }
+                                    let val = f(iter_args.as_ptr());
+                                    if reduction_step(entry.reduction, &mut acc, val) {
+                                        break;
+                                    }
+                                }
+                            } else {
+                                for i in 0..len {
+                                    let mut iter_args = Vec::with_capacity(expected);
+                                    for j in 0..expected {
+                                        iter_args.push(unsafe { read_buffer_f64(&views[j], i) });
+                                    }
+                                    let val = f(iter_args.as_ptr());
+                                    if reduction_step(entry.reduction, &mut acc, val) {
+                                        break;
+                                    }
+                                }
+                            }
+                            return Ok(acc.into_py(py));
+                        }
+
                         let mut results = Vec::with_capacity(len);
                         const MAX_FAST_ARGS: usize = 8;
                         if expected <= MAX_FAST_ARGS {
@@ -825,6 +1096,43 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
 
         if all_buffers {
             if let Some(len) = common_len {
+                if entry.reduction != ReductionMode::None {
+                    let mut acc = reduction_identity(entry.reduction);
+                    const MAX_FAST_ARGS: usize = 8;
+                    if arg_count <= MAX_FAST_ARGS {
+                        for i in 0..len {
+                            let mut iter_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
+                            for j in 0..arg_count {
+                                iter_args[j] = unsafe { read_buffer_f64(&views[j], i) };
+                            }
+                            let val = f(iter_args.as_ptr());
+                            if reduction_step(entry.reduction, &mut acc, val) {
+                                break;
+                            }
+                        }
+                    } else {
+                        for i in 0..len {
+                            let mut iter_args = Vec::with_capacity(arg_count);
+                            for j in 0..arg_count {
+                                iter_args.push(unsafe { read_buffer_f64(&views[j], i) });
+                            }
+                            let val = f(iter_args.as_ptr());
+                            if reduction_step(entry.reduction, &mut acc, val) {
+                                break;
+                            }
+                        }
+                    }
+
+                    store_exec_profile(
+                        entry.func_ptr,
+                        JitExecProfile::VectorizedBuffers {
+                            arg_count,
+                            elem_types: views.iter().map(|v| v.elem_type).collect::<Vec<_>>(),
+                        },
+                    );
+                    return Ok(acc.into_py(py));
+                }
+
                 let mut results = Vec::with_capacity(len);
                 let elem_types = views.iter().map(|v| v.elem_type).collect::<Vec<_>>();
                 let all_f64 = elem_types.iter().all(|k| *k == BufferElemType::F64);
@@ -875,6 +1183,26 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                 let array_mod = py.import("array")?;
                 let array_obj = array_mod.getattr("array")?.call1(("d", py_bytes))?;
                 return Ok(array_obj.into_py(py));
+            }
+        }
+    }
+
+    // 2.5 Sequence fallback for reduction-style single-arg kernels
+    if arg_count == 1 && entry.arg_count == 1 && entry.reduction != ReductionMode::None {
+        if let Ok(item) = args.get_item(0) {
+            if let Ok(iter) = item.iter() {
+                let mut acc = reduction_identity(entry.reduction);
+                let mut buf = [0.0_f64; 1];
+                for obj_res in iter {
+                    let obj = obj_res?;
+                    let val: f64 = obj.extract()?;
+                    buf[0] = val;
+                    let out = f(buf.as_ptr());
+                    if reduction_step(entry.reduction, &mut acc, out) {
+                        break;
+                    }
+                }
+                return Ok(acc.into_py(py));
             }
         }
     }

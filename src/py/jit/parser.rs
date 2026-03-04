@@ -69,6 +69,34 @@ pub enum Expr {
         body: Box<Expr>,
         pred: Option<Box<Expr>>,
     },
+    AnyFor {
+        iter_var: String,
+        start: Box<Expr>,
+        end: Box<Expr>,
+        step: Option<Box<Expr>>,
+        body: Box<Expr>,
+        pred: Option<Box<Expr>>,
+    },
+    AllFor {
+        iter_var: String,
+        start: Box<Expr>,
+        end: Box<Expr>,
+        step: Option<Box<Expr>>,
+        body: Box<Expr>,
+        pred: Option<Box<Expr>>,
+    },
+    AnyOver {
+        iter_var: String,
+        container: Box<Expr>,
+        body: Box<Expr>,
+        pred: Option<Box<Expr>>,
+    },
+    AllOver {
+        iter_var: String,
+        container: Box<Expr>,
+        body: Box<Expr>,
+        pred: Option<Box<Expr>>,
+    },
     /// generator over a runtime container (e.g. Python list/ndarray)
     SumOver {
         iter_var: String,
@@ -273,7 +301,7 @@ impl Parser {
                 if peek == "(" {
                     // function call
                     self.next(); // consume '('
-                    if tok == "sum" && !matches!(self.peek(), Some(")")) {
+                    if (tok == "sum" || tok == "any" || tok == "all") && !matches!(self.peek(), Some(")")) {
                         let body_expr = self.parse_expr()?;
                         if matches!(self.peek(), Some("for")) {
                             self.next(); // for
@@ -318,14 +346,33 @@ impl Parser {
                                     return None;
                                 }
                                 self.next(); // outer ')'
-                                return Some(Expr::SumFor {
-                                    iter_var,
-                                    start: Box::new(start),
-                                    end: Box::new(end),
-                                    step: step.map(Box::new),
-                                    body: Box::new(body_expr),
-                                    pred,
-                                });
+                                return match tok.as_str() {
+                                    "sum" => Some(Expr::SumFor {
+                                        iter_var,
+                                        start: Box::new(start),
+                                        end: Box::new(end),
+                                        step: step.map(Box::new),
+                                        body: Box::new(body_expr),
+                                        pred,
+                                    }),
+                                    "any" => Some(Expr::AnyFor {
+                                        iter_var,
+                                        start: Box::new(start),
+                                        end: Box::new(end),
+                                        step: step.map(Box::new),
+                                        body: Box::new(body_expr),
+                                        pred,
+                                    }),
+                                    "all" => Some(Expr::AllFor {
+                                        iter_var,
+                                        start: Box::new(start),
+                                        end: Box::new(end),
+                                        step: step.map(Box::new),
+                                        body: Box::new(body_expr),
+                                        pred,
+                                    }),
+                                    _ => None,
+                                };
                             } else {
                                 // container form: parse single expr for container
                                 let container = self.parse_or()?;
@@ -338,12 +385,27 @@ impl Parser {
                                     return None;
                                 }
                                 self.next(); // closing ')'
-                                return Some(Expr::SumOver {
-                                    iter_var,
-                                    container: Box::new(container),
-                                    body: Box::new(body_expr),
-                                    pred,
-                                });
+                                return match tok.as_str() {
+                                    "sum" => Some(Expr::SumOver {
+                                        iter_var,
+                                        container: Box::new(container),
+                                        body: Box::new(body_expr),
+                                        pred,
+                                    }),
+                                    "any" => Some(Expr::AnyOver {
+                                        iter_var,
+                                        container: Box::new(container),
+                                        body: Box::new(body_expr),
+                                        pred,
+                                    }),
+                                    "all" => Some(Expr::AllOver {
+                                        iter_var,
+                                        container: Box::new(container),
+                                        body: Box::new(body_expr),
+                                        pred,
+                                    }),
+                                    _ => None,
+                                };
                             }
                         } else {
                             let mut args = vec![body_expr];
@@ -461,6 +523,36 @@ mod tests {
         match ast {
             Expr::BinOp(_, op, _) => assert_eq!(op, "and"),
             other => panic!("unexpected AST: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_any_all_range_generators() {
+        let mut p_any = Parser::new(tokenize("any(i > 3 for i in range(5))"));
+        match p_any.parse_expr().expect("any should parse") {
+            Expr::AnyFor { .. } => {}
+            other => panic!("unexpected any AST: {:?}", other),
+        }
+
+        let mut p_all = Parser::new(tokenize("all(i < 5 for i in range(5) if i > 0)"));
+        match p_all.parse_expr().expect("all should parse") {
+            Expr::AllFor { .. } => {}
+            other => panic!("unexpected all AST: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_any_all_container_generators() {
+        let mut p_any = Parser::new(tokenize("any(x_i > 0 for x_i in x)"));
+        match p_any.parse_expr().expect("any container should parse") {
+            Expr::AnyOver { .. } => {}
+            other => panic!("unexpected any-over AST: {:?}", other),
+        }
+
+        let mut p_all = Parser::new(tokenize("all(x_i > 0 for x_i in x if x_i != 0)"));
+        match p_all.parse_expr().expect("all container should parse") {
+            Expr::AllOver { .. } => {}
+            other => panic!("unexpected all-over AST: {:?}", other),
         }
     }
 }

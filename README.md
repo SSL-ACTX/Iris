@@ -73,8 +73,8 @@ Current JIT support (concise):
 - **Logic:** `and`, `or`, `not`, boolean literals `True/False`.
 - **Comparisons:** `< > <= >= == !=`, including chained comparisons (`a < b < c`).
 - **Conditionals:** Python ternary (`a if cond else b`).
-- **Loops:** `sum(expr for i in range(...))`, with optional `step` and `if` predicate,
-    plus container form `sum(expr for x_i in x)` via wrapper vectorization.
+- **Generator reductions:** `sum(...)`, `any(...)`, `all(...)` over `range(...)` with optional `step` and `if` predicate.
+- **Container generators:** `sum(...)`, `any(...)`, `all(...)` over runtime containers (`for x_i in x`) including optional `if` predicate.
 - **Math calls:** `sin cos tan sinh cosh tanh exp log sqrt pow abs`, and `math.*` variants.
 
 Speculative type inference and execution:
@@ -86,6 +86,11 @@ Supported JIT argument data types:
 - **Scalars:** Python `float`, `int`, and `bool` (converted to native `f64` inputs for JIT ABI).
 - **Buffers / vectorized inputs:** contiguous buffers with element types `f64`, `f32`, signed/unsigned ints, and bool.
 - **Mixed buffers:** multiple vectorized arguments are supported when they share a common logical length.
+
+Reduction execution behavior:
+- Native reduction modes are tracked per compiled entry (`sum` / `any` / `all`).
+- `any` / `all` apply native short-circuit semantics during vectorized execution.
+- For single-argument reduction kernels, non-buffer Python iterables (for example lists/tuples) use a safe sequence fallback path in Rust.
 
 Optimizer highlights:
 - constant folding + algebraic simplification,
@@ -197,7 +202,8 @@ print(result)  # 3.7416573867739416
 - Booleans: `and/or/not`, `True/False`
 - Comparisons: `< > <= >= == !=`, including chains (`x < y < z`)
 - Conditionals: `a if cond else b`
-- Loops: `sum(...)` over `range(...)` (with step/predicate) and container generators
+- Generator reductions: `sum(...)`, `any(...)`, `all(...)` over `range(...)` (with step/predicate)
+- Container generators: `sum(...)`, `any(...)`, `all(...)` over runtime containers, including `if` filters
 - Math: `sin cos tan sinh cosh tanh exp log sqrt pow abs`, including `math.*`
 
 #### Speculative Typing + Data Types
@@ -215,6 +221,7 @@ print(result)  # 3.7416573867739416
 #### Fallback + Logging
 - JIT compile failure auto-falls back to normal Python execution.
 - Runtime profile mismatch (dtype/shape) also falls back safely.
+- Reduction kernels support safe non-buffer iterable fallback (list/tuple/etc.) when zero-copy buffer paths are unavailable.
 - Enable logs by env: `IRIS_JIT_LOG=1`.
 - Control at runtime from Python:
     - `iris.jit.set_jit_logging(True|False|None, env_var=None)`

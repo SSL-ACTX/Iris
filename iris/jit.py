@@ -120,11 +120,24 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                     if "no JIT entry" in msg or "failed to compile" in msg:
                         return func(*args, **kwargs)
                     raise
-                # If JIT returned a sequence (vectorized run), sum the
-                # elements to preserve the semantics of a generator sum.
+                reduction_mode: Optional[str] = None
+                if isinstance(src, str):
+                    src_s = src.strip()
+                    if src_s.startswith("sum("):
+                        reduction_mode = "sum"
+                    elif src_s.startswith("any("):
+                        reduction_mode = "any"
+                    elif src_s.startswith("all("):
+                        reduction_mode = "all"
+
+                # If JIT returned a sequence (vectorized run), reduce according
+                # to generator semantics.
                 try:
-                    # try treating result as iterable of floats
                     if hasattr(res, "__iter__") and not isinstance(res, (float, int)):
+                        if reduction_mode == "any":
+                            return 1.0 if any(float(v) != 0.0 for v in res) else 0.0
+                        if reduction_mode == "all":
+                            return 1.0 if all(float(v) != 0.0 for v in res) else 0.0
                         total = 0.0
                         for v in res:
                             total += float(v)

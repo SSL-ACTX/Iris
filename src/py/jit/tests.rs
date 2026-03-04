@@ -196,6 +196,89 @@ fn compile_jit_math_functions() {
     }
 
     #[test]
+    fn compile_jit_any_container_with_predicate() {
+        let args = vec!["x".to_string()];
+        let entry = compile_jit("any(x_i > 0 for x_i in x if x_i != 0)", &args)
+            .expect("container any with predicate should compile");
+        assert_eq!(entry.arg_count, 1);
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+
+        let positive = [2.0];
+        assert_eq!(f(positive.as_ptr()), 1.0);
+
+        let zero = [0.0];
+        assert_eq!(f(zero.as_ptr()), 0.0);
+
+        let negative = [-3.0];
+        assert_eq!(f(negative.as_ptr()), 0.0);
+    }
+
+    #[test]
+    fn compile_jit_all_container_with_predicate() {
+        let args = vec!["x".to_string()];
+        let entry = compile_jit("all(x_i > 0 for x_i in x if x_i != 0)", &args)
+            .expect("container all with predicate should compile");
+        assert_eq!(entry.arg_count, 1);
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+
+        let positive = [2.0];
+        assert_eq!(f(positive.as_ptr()), 1.0);
+
+        let zero = [0.0];
+        assert_eq!(f(zero.as_ptr()), 1.0);
+
+        let negative = [-3.0];
+        assert_eq!(f(negative.as_ptr()), 0.0);
+    }
+
+    #[test]
+    fn compile_jit_any_range_generator() {
+        let entry = compile_jit("any(i > 3 for i in range(5))", &vec![]).expect("any range");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let empty: [f64; 0] = [];
+        assert_eq!(f(empty.as_ptr()), 1.0);
+
+        let entry2 = compile_jit("any(i > 10 for i in range(5))", &vec![]).expect("any range false");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
+        assert_eq!(g(empty.as_ptr()), 0.0);
+
+        let entry3 = compile_jit("any(i > 0 for i in range(0))", &vec![]).expect("any empty");
+        let h: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry3.func_ptr) };
+        assert_eq!(h(empty.as_ptr()), 0.0);
+    }
+
+    #[test]
+    fn compile_jit_all_range_generator() {
+        let entry = compile_jit("all(i < 5 for i in range(5))", &vec![]).expect("all range true");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let empty: [f64; 0] = [];
+        assert_eq!(f(empty.as_ptr()), 1.0);
+
+        let entry2 = compile_jit("all(i < 3 for i in range(5))", &vec![]).expect("all range false");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
+        assert_eq!(g(empty.as_ptr()), 0.0);
+
+        let entry3 = compile_jit("all(i > 0 for i in range(0))", &vec![]).expect("all empty");
+        let h: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry3.func_ptr) };
+        assert_eq!(h(empty.as_ptr()), 1.0);
+    }
+
+    #[test]
+    fn compile_jit_any_all_with_predicate() {
+        let empty: [f64; 0] = [];
+
+        let any_pred = compile_jit("any(i > 3 for i in range(6) if i % 2 == 0)", &vec![])
+            .expect("any with predicate");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(any_pred.func_ptr) };
+        assert_eq!(f(empty.as_ptr()), 1.0); // included set: {0,2,4}
+
+        let all_pred = compile_jit("all(i % 2 == 0 for i in range(6) if i < 5)", &vec![])
+            .expect("all with predicate");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(all_pred.func_ptr) };
+        assert_eq!(g(empty.as_ptr()), 0.0); // included set: {0,1,2,3,4}
+    }
+
+    #[test]
     fn compile_jit_range_step_and_predicate() {
         let entry = compile_jit("sum(i for i in range(0,10,2))", &vec![]).expect("step");
         let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
@@ -420,5 +503,35 @@ mv=memoryview(buf)[1:].cast('d')",
         let out_obj = execute_jit_func(py, &entry, tuple).expect("execute unaligned packed");
         let out: f64 = out_obj.extract(py).unwrap();
         assert_eq!(out, 3.0);
+    });
+}
+
+#[test]
+fn execute_jit_container_reductions_with_python_lists() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let locals = pyo3::types::PyDict::new(py);
+        let list_obj = py.eval("[1.0, -2.0, 3.0, 0.0]", None, Some(locals)).unwrap();
+
+        let sum_entry = compile_jit("sum(x_i * x_i for x_i in x)", &vec!["x".to_string()])
+            .expect("sum container compile");
+        let sum_tuple = PyTuple::new(py, &[list_obj]);
+        let sum_obj = execute_jit_func(py, &sum_entry, sum_tuple).expect("sum container execute");
+        let sum_val: f64 = sum_obj.extract(py).unwrap();
+        assert_eq!(sum_val, 14.0);
+
+        let any_entry = compile_jit("any(x_i > 2 for x_i in x if x_i != 0)", &vec!["x".to_string()])
+            .expect("any container compile");
+        let any_tuple = PyTuple::new(py, &[list_obj]);
+        let any_obj = execute_jit_func(py, &any_entry, any_tuple).expect("any container execute");
+        let any_val: f64 = any_obj.extract(py).unwrap();
+        assert_eq!(any_val, 1.0);
+
+        let all_entry = compile_jit("all(x_i >= -2 for x_i in x if x_i != 0)", &vec!["x".to_string()])
+            .expect("all container compile");
+        let all_tuple = PyTuple::new(py, &[list_obj]);
+        let all_obj = execute_jit_func(py, &all_entry, all_tuple).expect("all container execute");
+        let all_val: f64 = all_obj.extract(py).unwrap();
+        assert_eq!(all_val, 1.0);
     });
 }

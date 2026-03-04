@@ -228,6 +228,67 @@ async fn py_jit_offload_decorator_async() {
         // result should still be correct (1+4+9=14)
         assert_eq!(res, 14.0);
 
+        py.run(
+            "def any_pos(x): return any((x_i > 0 for x_i in x if x_i != 0))",
+            None,
+            Some(locals),
+        )
+        .unwrap();
+        let any_pos = locals.get_item("any_pos").unwrap().to_object(py);
+        let _ = register
+            .call1(
+                py,
+                (
+                    any_pos.clone(),
+                    Some("jit"),
+                    Some("float"),
+                    Some("any((x_i > 0 for x_i in x if x_i != 0))".to_string()),
+                    Some(vec!["x".to_string()]),
+                ),
+            )
+            .unwrap();
+        let arr_any = py.eval("[-1.0, 0.0, 2.0]", None, Some(locals)).unwrap();
+        let any_res: f64 = jitcall
+            .call1(py, (any_pos, PyTuple::new(py, &[arr_any]), Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(any_res, 1.0);
+
+        py.run(
+            "def all_nonzero_nonneg(x): return all((x_i >= 0 for x_i in x if x_i != 0))",
+            None,
+            Some(locals),
+        )
+        .unwrap();
+        let all_nonzero_nonneg = locals.get_item("all_nonzero_nonneg").unwrap().to_object(py);
+        let _ = register
+            .call1(
+                py,
+                (
+                    all_nonzero_nonneg.clone(),
+                    Some("jit"),
+                    Some("float"),
+                    Some("all((x_i >= 0 for x_i in x if x_i != 0))".to_string()),
+                    Some(vec!["x".to_string()]),
+                ),
+            )
+            .unwrap();
+        let arr_all = py.eval("[0.0, 1.0, 2.0]", None, Some(locals)).unwrap();
+        let all_res: f64 = jitcall
+            .call1(
+                py,
+                (
+                    all_nonzero_nonneg,
+                    PyTuple::new(py, &[arr_all]),
+                    Option::<&PyDict>::None,
+                ),
+            )
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(all_res, 1.0);
+
         let mexp = locals.get_item("mexp").unwrap().to_object(py);
         let _decorated_exp: PyObject = register
             .call1(py, (mexp.clone(), Some("jit"), Some("float"),
