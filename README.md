@@ -77,11 +77,26 @@ Current JIT support (concise):
     plus container form `sum(expr for x_i in x)` via wrapper vectorization.
 - **Math calls:** `sin cos tan sinh cosh tanh exp log sqrt pow abs`, and `math.*` variants.
 
+Speculative type inference and execution:
+- Runtime execution profiles are cached per compiled function (scalar, packed-buffer, vectorized-buffer).
+- First successful call establishes a fast-path profile; subsequent calls use the specialized path when shape/types match.
+- On profile mismatch, Iris safely falls back to generic conversion and can adapt to new input shapes.
+
+Supported JIT argument data types:
+- **Scalars:** Python `float`, `int`, and `bool` (converted to native `f64` inputs for JIT ABI).
+- **Buffers / vectorized inputs:** contiguous buffers with element types `f64`, `f32`, signed/unsigned ints, and bool.
+- **Mixed buffers:** multiple vectorized arguments are supported when they share a common logical length.
+
 Optimizer highlights:
 - constant folding + algebraic simplification,
 - closed-form rewrites for common linear/quadratic range sums,
 - safe constant evaluation for many bounded loop cases,
 - automatic fallback to Python when compilation is not possible.
+
+Safety hardening highlights:
+- typed-buffer format/item-size validation before execution,
+- unaligned-memory-safe reads for typed buffer decoding,
+- conservative fallback paths when direct zero-copy assumptions are not valid.
 
 Logging is environment-aware and runtime-configurable:
 - env mode: `IRIS_JIT_LOG=1` enables Rust-side JIT debug logs,
@@ -185,6 +200,12 @@ print(result)  # 3.7416573867739416
 - Loops: `sum(...)` over `range(...)` (with step/predicate) and container generators
 - Math: `sin cos tan sinh cosh tanh exp log sqrt pow abs`, including `math.*`
 
+#### Speculative Typing + Data Types
+- Speculative profiles are cached per function call-shape for faster repeat execution.
+- Scalar inputs support Python `float`, `int`, and `bool`.
+- Buffer/vectorized inputs support contiguous `f64`, `f32`, signed/unsigned integer, and bool element types.
+- On type/shape mismatch, execution falls back to safe generic conversion logic.
+
 #### Optimizer Behavior
 - Constant folding + simplification (including boolean/relation folding)
 - Loop rewrites for common linear/quadratic forms
@@ -193,6 +214,7 @@ print(result)  # 3.7416573867739416
 
 #### Fallback + Logging
 - JIT compile failure auto-falls back to normal Python execution.
+- Runtime profile mismatch (dtype/shape) also falls back safely.
 - Enable logs by env: `IRIS_JIT_LOG=1`.
 - Control at runtime from Python:
     - `iris.jit.set_jit_logging(True|False|None, env_var=None)`

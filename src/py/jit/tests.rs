@@ -278,3 +278,115 @@ fn compile_jit_math_functions() {
         let vals_true = [3.0, 2.0, 2.0];
         assert_eq!(f(vals_true.as_ptr()), 1.0);
     }
+
+#[test]
+fn execute_jit_accepts_mixed_scalar_types() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let args = vec!["x".to_string(), "y".to_string(), "z".to_string()];
+        let entry = compile_jit("x + y + z", &args).expect("compile mixed scalar test");
+        let tuple = PyTuple::new(
+            py,
+            vec![1_i64.into_py(py), true.into_py(py), 2_i32.into_py(py)],
+        );
+        let result = execute_jit_func(py, &entry, tuple).expect("execute mixed scalars");
+        let out: f64 = result.extract(py).unwrap();
+        assert_eq!(out, 4.0);
+    });
+}
+
+#[test]
+fn execute_jit_vectorizes_non_f64_buffers() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let array_mod = py.import("array").unwrap();
+
+        let args = vec!["x".to_string()];
+        let mul_entry = compile_jit("x * 2", &args).expect("compile f32 buffer test");
+        let f32_in = array_mod
+            .getattr("array")
+            .unwrap()
+            .call1(("f", vec![1.5_f32, 2.0_f32, -3.0_f32]))
+            .unwrap();
+        let f32_tuple = PyTuple::new(py, &[f32_in]);
+        let f32_out = execute_jit_func(py, &mul_entry, f32_tuple).expect("execute f32 buffer");
+        let f32_vals: Vec<f64> = f32_out
+            .as_ref(py)
+            .call_method0("tolist")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(f32_vals, vec![3.0, 4.0, -6.0]);
+
+        let add_entry = compile_jit("x + 1", &args).expect("compile i32 buffer test");
+        let i32_in = array_mod
+            .getattr("array")
+            .unwrap()
+            .call1(("i", vec![1_i32, 2_i32, 7_i32]))
+            .unwrap();
+        let i32_tuple = PyTuple::new(py, &[i32_in]);
+        let i32_out = execute_jit_func(py, &add_entry, i32_tuple).expect("execute i32 buffer");
+        let i32_vals: Vec<f64> = i32_out
+            .as_ref(py)
+            .call_method0("tolist")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(i32_vals, vec![2.0, 3.0, 8.0]);
+    });
+}
+
+#[test]
+fn execute_jit_handles_unaligned_f64_buffer_vectorized() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let locals = pyo3::types::PyDict::new(py);
+        py.run(
+            "import struct\n\
+buf=bytearray(1 + 8*3)\n\
+struct.pack_into('ddd', buf, 1, 1.0, 2.0, 3.0)\n\
+mv=memoryview(buf)[1:].cast('d')",
+            None,
+            Some(locals),
+        )
+        .unwrap();
+        let mv = locals.get_item("mv").unwrap();
+
+        let args = vec!["x".to_string()];
+        let entry = compile_jit("x * 2", &args).expect("compile unaligned vectorized test");
+        let tuple = PyTuple::new(py, &[mv]);
+        let out_obj = execute_jit_func(py, &entry, tuple).expect("execute unaligned vectorized");
+        let out: Vec<f64> = out_obj
+            .as_ref(py)
+            .call_method0("tolist")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(out, vec![2.0, 4.0, 6.0]);
+    });
+}
+
+#[test]
+fn execute_jit_handles_unaligned_f64_buffer_packed_args() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let locals = pyo3::types::PyDict::new(py);
+        py.run(
+            "import struct\n\
+buf=bytearray(1 + 8*2)\n\
+struct.pack_into('dd', buf, 1, 1.0, 2.0)\n\
+mv=memoryview(buf)[1:].cast('d')",
+            None,
+            Some(locals),
+        )
+        .unwrap();
+        let mv = locals.get_item("mv").unwrap();
+
+        let args = vec!["a".to_string(), "b".to_string()];
+        let entry = compile_jit("a + b", &args).expect("compile unaligned packed test");
+        let tuple = PyTuple::new(py, &[mv]);
+        let out_obj = execute_jit_func(py, &entry, tuple).expect("execute unaligned packed");
+        let out: f64 = out_obj.extract(py).unwrap();
+        assert_eq!(out, 3.0);
+    });
+}
