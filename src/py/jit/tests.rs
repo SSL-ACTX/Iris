@@ -422,6 +422,45 @@ fn compile_jit_math_functions() {
         .expect("sum_while break_on_nan compile");
         let h: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(sum_break_nan.func_ptr) };
         assert_eq!(h(empty.as_ptr()), 0.0);
+
+        let any_while = compile_jit(
+            "any_while(i, 0, i < 8, i + 1, i >= 6)",
+            &vec![],
+        )
+        .expect("any_while compile");
+        let q: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(any_while.func_ptr) };
+        assert_eq!(q(empty.as_ptr()), 1.0);
+
+        let all_while = compile_jit(
+            "all_while(i, 0, i < 8, i + 1, i < 8)",
+            &vec![],
+        )
+        .expect("all_while compile");
+        let r: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(all_while.func_ptr) };
+        assert_eq!(r(empty.as_ptr()), 1.0);
+
+        let any_continue_nan = compile_jit(
+            "any_while(i, 0, i < 5, i + 1, continue_on_nan((i - i) / (i - i)))",
+            &vec![],
+        )
+        .expect("any_while continue_on_nan compile");
+        let s: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(any_continue_nan.func_ptr) };
+        assert_eq!(s(empty.as_ptr()), 0.0);
+    }
+
+    #[test]
+    fn compile_jit_function_inlining_min_max() {
+        let args = vec!["x".to_string(), "y".to_string()];
+        let entry = compile_jit("max(x, y) - min(x, y)", &args).expect("min/max compile");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals = [2.0, 7.0];
+        assert_eq!(f(vals.as_ptr()), 5.0);
+
+        let entry2 = compile_jit("sum(max(i, 2) - min(i, 2) for i in range(5))", &vec![])
+            .expect("min/max in reduction compile");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
+        let empty: [f64; 0] = [];
+        assert_eq!(g(empty.as_ptr()), 6.0);
     }
 
     #[test]

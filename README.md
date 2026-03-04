@@ -75,7 +75,7 @@ Current JIT support (concise):
 - **Conditionals:** Python ternary (`a if cond else b`).
 - **Conditional function form:** `if_else(cond, when_true, when_false)`.
 - **Generator reductions:** `sum(...)`, `any(...)`, `all(...)` over `range(...)` with optional `step` and `if` predicate.
-- **While reductions (MVP):** `sum_while(iter, init, cond, step, body)` for expression-level while loops.
+- **While reductions:** `sum_while(...)`, `any_while(...)`, `all_while(...)` for expression-level while loops.
 - **Container generators:** `sum(...)`, `any(...)`, `all(...)` over runtime containers (`for x_i in x`) including optional `if` predicate.
 - **Loop-control intrinsics:** `break_if|break_when|break_unless(cond, value)` and `continue_if|continue_when|continue_unless(cond, value)` inside generator bodies for reduction control flow.
 - **Guarded loop-control intrinsics:** `break_on_nan(value)` / `continue_on_nan(value)` for NaN-safe reduction paths.
@@ -104,6 +104,7 @@ Reduction execution behavior:
 - Alias semantics: `*_if` and `*_when` are equivalent; `*_unless(cond, value)` is equivalent to the inverted condition form.
 - `break_on_nan` stops reduction when the candidate value is NaN; `continue_on_nan` skips NaN contributions.
 - `sum_while` executes with an internal iteration safety cap to prevent unbounded JIT loops.
+- `any_while` / `all_while` use native short-circuit while lowering in JIT codegen.
 
 Optimizer highlights:
 - constant folding + algebraic simplification,
@@ -218,6 +219,7 @@ print(result)  # 3.7416573867739416
 - Conditional function form: `if_else(cond, when_true, when_false)`
 - Generator reductions: `sum(...)`, `any(...)`, `all(...)` over `range(...)` (with step/predicate)
 - While reduction (MVP): `sum_while(iter, init, cond, step, body)`
+- While reductions: `sum_while(...)`, `any_while(...)`, `all_while(...)`
 - Container generators: `sum(...)`, `any(...)`, `all(...)` over runtime containers, including `if` filters
 - Loop-control intrinsics in generator bodies: `break_if|break_when|break_unless(cond, value)`, `continue_if|continue_when|continue_unless(cond, value)`
 - Guarded loop-control intrinsics: `break_on_nan(value)`, `continue_on_nan(value)`
@@ -231,6 +233,7 @@ print(result)  # 3.7416573867739416
 
 #### Optimizer Behavior
 - Constant folding + simplification (including boolean/relation folding)
+- Built-in function inlining for `min(x,y)` / `max(x,y)` into branchless selects
 - Loop rewrites for common linear/quadratic forms
 - Constant-bound loop evaluation when safe
 - Exponent shortcuts (`x**0.5 -> sqrt(x)`, `x**-1 -> 1.0/x`)

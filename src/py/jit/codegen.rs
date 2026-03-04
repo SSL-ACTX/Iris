@@ -613,6 +613,153 @@ fn gen_expr(
         }
         Expr::Call(name, args) => {
             let symbol = name.rsplit('.').next().unwrap().to_string();
+            if (symbol == "any_while" || symbol == "all_while") && args.len() == 5 {
+                if let Expr::Var(iter_name) = &args[0] {
+                    let init_val = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
+                    let cond_expr = &args[2];
+                    let step_expr = &args[3];
+                    let body_expr_raw = &args[4];
+
+                    let zero = fb.ins().f64const(0.0);
+                    let one = fb.ins().f64const(1.0);
+                    let false_mask = fb.ins().fcmp(FloatCC::Equal, zero, one);
+                    let true_mask = fb.ins().fcmp(FloatCC::Equal, zero, zero);
+                    let acc_init = if symbol == "any_while" { zero } else { one };
+
+                    let loop_block = fb.create_block();
+                    let body_block = fb.create_block();
+                    let continue_block = fb.create_block();
+                    let exit_block = fb.create_block();
+                    fb.append_block_param(loop_block, types::F64); // iter
+                    fb.append_block_param(loop_block, types::F64); // acc
+                    fb.append_block_param(loop_block, types::I64); // budget
+                    fb.append_block_param(continue_block, types::F64); // next_iter
+                    fb.append_block_param(continue_block, types::F64); // next_acc
+                    fb.append_block_param(continue_block, types::I64); // next_budget
+                    fb.append_block_param(exit_block, types::F64); // result
+
+                    let max_iters = fb.ins().iconst(types::I64, 1_000_000);
+                    fb.ins().jump(loop_block, &[init_val, acc_init, max_iters]);
+
+                    fb.switch_to_block(loop_block);
+                    let iter_val = fb.block_params(loop_block)[0];
+                    let acc_val = fb.block_params(loop_block)[1];
+                    let budget_val = fb.block_params(loop_block)[2];
+                    let budget_exhausted = fb.ins().icmp_imm(IntCC::Equal, budget_val, 0);
+                    let budget_ok_block = fb.create_block();
+                    let budget_exit_block = fb.create_block();
+                    fb.ins().brnz(budget_exhausted, budget_exit_block, &[]);
+                    fb.ins().jump(budget_ok_block, &[]);
+
+                    fb.switch_to_block(budget_exit_block);
+                    fb.ins().jump(exit_block, &[acc_val]);
+
+                    fb.switch_to_block(budget_ok_block);
+                    let mut while_locals = locals.clone();
+                    while_locals.insert(iter_name.clone(), iter_val);
+                    let cond_val = gen_expr(cond_expr, fb, ptr, arg_names, module, &while_locals);
+                    let cond_true = fb.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
+                    fb.ins().brnz(cond_true, body_block, &[]);
+                    fb.ins().jump(exit_block, &[acc_val]);
+
+                    fb.switch_to_block(body_block);
+                    let ctrl = detect_loop_control(body_expr_raw);
+                    let body_expr = match ctrl {
+                        LoopControl::Break { value, .. } | LoopControl::Continue { value, .. } => value,
+                        LoopControl::None => body_expr_raw,
+                    };
+
+                    let break_true = if let LoopControl::Break { cond, .. } = ctrl {
+                        let break_cond_val = gen_expr(cond, fb, ptr, arg_names, module, &while_locals);
+                        fb.ins().fcmp(FloatCC::NotEqual, break_cond_val, zero)
+                    } else {
+                        false_mask
+                    };
+                    let break_true = if let LoopControl::Break { invert_cond, .. } = ctrl {
+                        if invert_cond {
+                            fb.ins().bnot(break_true)
+                        } else {
+                            break_true
+                        }
+                    } else {
+                        break_true
+                    };
+
+                    let continue_true = if let LoopControl::Continue { cond, .. } = ctrl {
+                        let continue_cond_val =
+                            gen_expr(cond, fb, ptr, arg_names, module, &while_locals);
+                        fb.ins().fcmp(FloatCC::NotEqual, continue_cond_val, zero)
+                    } else {
+                        false_mask
+                    };
+                    let continue_true = if let LoopControl::Continue { invert_cond, .. } = ctrl {
+                        if invert_cond {
+                            fb.ins().bnot(continue_true)
+                        } else {
+                            continue_true
+                        }
+                    } else {
+                        continue_true
+                    };
+
+                    let body_val = gen_expr(body_expr, fb, ptr, arg_names, module, &while_locals);
+                    let step_val = gen_expr(step_expr, fb, ptr, arg_names, module, &while_locals);
+                    let budget_next = fb.ins().iadd_imm(budget_val, -1);
+                    let body_bits = fb.ins().bitcast(types::I64, body_val);
+                    let is_break_sentinel =
+                        fb.ins().icmp_imm(IntCC::Equal, body_bits, BREAK_SENTINEL_BITS as i64);
+                    let is_continue_sentinel =
+                        fb.ins().icmp_imm(IntCC::Equal, body_bits, CONTINUE_SENTINEL_BITS as i64);
+                    let stop_now = fb.ins().bor(break_true, is_break_sentinel);
+                    let skip_body = fb.ins().bor(continue_true, is_continue_sentinel);
+
+                    let body_true = fb.ins().fcmp(FloatCC::NotEqual, body_val, zero);
+                    if symbol == "any_while" {
+                        let effective_true = fb.ins().select(skip_body, false_mask, body_true);
+                        let acc_true = fb.ins().fcmp(FloatCC::NotEqual, acc_val, zero);
+                        let next_true = fb.ins().bor(acc_true, effective_true);
+                        let stop_any = fb.ins().bor(stop_now, next_true);
+                        let any_exit_block = fb.create_block();
+                        fb.ins().brnz(stop_any, any_exit_block, &[]);
+                        fb.ins().jump(continue_block, &[step_val, zero, budget_next]);
+
+                        fb.switch_to_block(any_exit_block);
+                        let exit_val = fb.ins().select(stop_now, acc_val, one);
+                        fb.ins().jump(exit_block, &[exit_val]);
+                        fb.seal_block(any_exit_block);
+                    } else {
+                        let effective_true = fb.ins().select(skip_body, true_mask, body_true);
+                        let acc_true = fb.ins().fcmp(FloatCC::NotEqual, acc_val, zero);
+                        let next_true = fb.ins().band(acc_true, effective_true);
+                        let next_false = fb.ins().bnot(next_true);
+                        let stop_all = fb.ins().bor(stop_now, next_false);
+                        let all_exit_block = fb.create_block();
+                        fb.ins().brnz(stop_all, all_exit_block, &[]);
+                        fb.ins().jump(continue_block, &[step_val, one, budget_next]);
+
+                        fb.switch_to_block(all_exit_block);
+                        let exit_val = fb.ins().select(stop_now, acc_val, zero);
+                        fb.ins().jump(exit_block, &[exit_val]);
+                        fb.seal_block(all_exit_block);
+                    }
+
+                    fb.switch_to_block(continue_block);
+                    let next_iter = fb.block_params(continue_block)[0];
+                    let next_acc = fb.block_params(continue_block)[1];
+                    let next_budget = fb.block_params(continue_block)[2];
+                    fb.ins().jump(loop_block, &[next_iter, next_acc, next_budget]);
+
+                    fb.seal_block(body_block);
+                    fb.seal_block(budget_exit_block);
+                    fb.seal_block(budget_ok_block);
+                    fb.seal_block(continue_block);
+                    fb.seal_block(loop_block);
+                    fb.switch_to_block(exit_block);
+                    fb.seal_block(exit_block);
+                    return fb.block_params(exit_block)[0];
+                }
+            }
+
             if symbol == "sum_while" && args.len() == 5 {
                 if let Expr::Var(iter_name) = &args[0] {
                     let init_val = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
@@ -759,6 +906,20 @@ fn gen_expr(
                 let zero = fb.ins().f64const(0.0);
                 let cond_true = fb.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
                 return fb.ins().select(cond_true, then_val, else_val);
+            }
+
+            if symbol == "min" && args.len() == 2 {
+                let a = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
+                let b = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
+                let cond = fb.ins().fcmp(FloatCC::LessThanOrEqual, a, b);
+                return fb.ins().select(cond, a, b);
+            }
+
+            if symbol == "max" && args.len() == 2 {
+                let a = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
+                let b = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
+                let cond = fb.ins().fcmp(FloatCC::GreaterThanOrEqual, a, b);
+                return fb.ins().select(cond, a, b);
             }
 
             if (symbol == "break_if" || symbol == "loop_break_if"
