@@ -328,7 +328,12 @@ impl Parser {
                                 });
                             } else {
                                 // container form: parse single expr for container
-                                let container = self.parse_expr()?;
+                                let container = self.parse_or()?;
+                                let mut pred: Option<Box<Expr>> = None;
+                                if matches!(self.peek(), Some("if")) {
+                                    self.next();
+                                    pred = Some(Box::new(self.parse_expr()?));
+                                }
                                 if !matches!(self.peek(), Some(")")) {
                                     return None;
                                 }
@@ -337,7 +342,7 @@ impl Parser {
                                     iter_var,
                                     container: Box::new(container),
                                     body: Box::new(body_expr),
-                                    pred: None,
+                                    pred,
                                 });
                             }
                         } else {

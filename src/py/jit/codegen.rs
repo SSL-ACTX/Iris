@@ -120,13 +120,17 @@ pub fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
     // single scalar argument representing each element.
     let mut adjusted_args = arg_names.to_vec();
     // use a cloned copy when destructuring to release borrow immediately
-    if let Expr::SumOver { iter_var, container, body, pred: _ } = expr.clone() {
+    if let Expr::SumOver { iter_var, container, body, pred } = expr.clone() {
         if let Expr::Var(ref cont_name) = *container {
             if adjusted_args.len() == 1 && adjusted_args[0] == *cont_name {
                 crate::py::jit::jit_log(|| {
                     format!("[Iris][jit] converting SumOver '{}' in {}", iter_var, cont_name)
                 });
-                expr = *body.clone();
+                expr = if let Some(p) = pred {
+                    Expr::Ternary(p, body, Box::new(Expr::Const(0.0)))
+                } else {
+                    *body.clone()
+                };
                 adjusted_args = vec![iter_var.clone()];
             }
         }
@@ -384,8 +388,18 @@ fn gen_expr(
             fb.switch_to_block(loop_block);
             let i_val = fb.block_params(loop_block)[0];
             let acc_val = fb.block_params(loop_block)[1];
-            // assume positive step; only need simple less-than comparison
-            let cond = fb.ins().fcmp(FloatCC::LessThan, i_val, end_val);
+            // runtime-aware step direction:
+            // step > 0 => i < end
+            // step < 0 => i > end
+            // step == 0 => do not enter loop
+            let zero = fb.ins().f64const(0.0);
+            let step_pos = fb.ins().fcmp(FloatCC::GreaterThan, step_val, zero);
+            let step_neg = fb.ins().fcmp(FloatCC::LessThan, step_val, zero);
+            let cond_lt = fb.ins().fcmp(FloatCC::LessThan, i_val, end_val);
+            let cond_gt = fb.ins().fcmp(FloatCC::GreaterThan, i_val, end_val);
+            let run_pos = fb.ins().band(step_pos, cond_lt);
+            let run_neg = fb.ins().band(step_neg, cond_gt);
+            let cond = fb.ins().bor(run_pos, run_neg);
             fb.ins().brnz(cond, body_block, &[]);
             fb.ins().jump(exit_block, &[acc_val]);
             fb.switch_to_block(body_block);

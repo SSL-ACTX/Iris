@@ -164,6 +164,38 @@ fn compile_jit_math_functions() {
     }
 
     #[test]
+    fn compile_jit_sum_range_negative_step() {
+        let entry = compile_jit("sum(i for i in range(5, 0, -1))", &vec![]).expect("negative step");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let empty: [f64; 0] = [];
+        assert_eq!(f(empty.as_ptr()), 15.0);
+    }
+
+    #[test]
+    fn compile_jit_sum_range_negative_step_dynamic() {
+        let args = vec!["a".to_string(), "b".to_string(), "s".to_string()];
+        let entry = compile_jit("sum(i for i in range(a, b, s))", &args).expect("dynamic negative step");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals = [5.0, 0.0, -1.0];
+        assert_eq!(f(vals.as_ptr()), 15.0);
+    }
+
+    #[test]
+    fn compile_jit_sum_container_with_predicate() {
+        let args = vec!["x".to_string()];
+        let entry = compile_jit("sum(x_i for x_i in x if x_i > 0)", &args)
+            .expect("container generator with predicate should compile");
+        assert_eq!(entry.arg_count, 1);
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+
+        let positive = [3.0];
+        assert_eq!(f(positive.as_ptr()), 3.0);
+
+        let negative = [-2.0];
+        assert_eq!(f(negative.as_ptr()), 0.0);
+    }
+
+    #[test]
     fn compile_jit_range_step_and_predicate() {
         let entry = compile_jit("sum(i for i in range(0,10,2))", &vec![]).expect("step");
         let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
