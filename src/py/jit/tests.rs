@@ -105,6 +105,11 @@ fn compile_jit_math_functions() {
     let t: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry6.func_ptr) };
     let vals6 = [0.0];
     assert!((t(vals6.as_ptr()) - 0.0).abs() < 1e-12);
+
+    let entry7 = compile_jit("int(x) + float(1)", &args).expect("should compile int/float casts");
+    let u: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry7.func_ptr) };
+    let vals7 = [2.9];
+    assert!((u(vals7.as_ptr()) - 3.0).abs() < 1e-12);
 }
 
 #[test]

@@ -908,6 +908,23 @@ fn gen_expr(
                 return fb.ins().select(cond_true, then_val, else_val);
             }
 
+            if symbol == "float" && args.len() == 1 {
+                return gen_expr(&args[0], fb, ptr, arg_names, module, locals);
+            }
+
+            if symbol == "int" && args.len() == 1 {
+                let v = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
+                let mut sig = module.make_signature();
+                sig.params.push(AbiParam::new(types::F64));
+                sig.returns.push(AbiParam::new(types::F64));
+                let fid = module
+                    .declare_function("trunc", Linkage::Import, &sig)
+                    .expect("failed to declare trunc");
+                let local = module.declare_func_in_func(fid, &mut fb.func);
+                let call = fb.ins().call(local, &[v]);
+                return fb.inst_results(call)[0];
+            }
+
             if symbol == "min" && args.len() == 2 {
                 let a = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
                 let b = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
