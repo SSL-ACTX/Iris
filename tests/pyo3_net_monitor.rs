@@ -59,13 +59,12 @@ async fn test_remote_monitoring_failure() {
     Python::with_gil(|py| {
         // In a real scenario, we'd check if a restart was triggered.
         // Here we just check if Node B's internal supervisor state was updated.
-        let count: usize = rt_b
+        let _count: usize = rt_b
             .call_method0(py, "children_count")
             .unwrap()
             .extract(py)
             .unwrap();
-        // If monitor_remote worked, the "virtual child" exit was notified.
-        // (Note: This depends on how you've linked the monitor to the child list)
-        assert!(count >= 0);
+        // The count value isn't meaningful to validate in this simplified test;
+        // we just ensure the call succeeds and the return value is a usize.
     });
 }

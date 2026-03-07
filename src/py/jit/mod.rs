@@ -18,8 +18,6 @@ use pyo3::prelude::*;
 #[cfg(feature = "pyo3")]
 use pyo3::types::{PyDict, PyTuple};
 
-use cranelift::prelude::*;
-use cranelift_native;
 use pyo3::AsPyPointer;
 
 pub(crate) mod parser;

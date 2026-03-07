@@ -2,6 +2,8 @@
 //! Unit tests formerly embedded in `mod.rs`.  Now separated for clarity.
 
 use super::*;
+use cranelift::prelude::settings;
+use cranelift::prelude::Configurable;
 use crate::py::jit::codegen::execute_jit_func;
 use crate::py::jit::codegen::{
     lookup_named_jit,

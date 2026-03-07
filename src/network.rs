@@ -19,12 +19,17 @@ use tracing::{debug, info, warn};
 const PROTOCOL_VERSION: u8 = 1;
 
 /// How large a single user payload can be before the connection is torn down.
+#[cfg(test)]
 const MAX_PAYLOAD_LEN: usize = 1024 * 1024; // 1 MiB
 
 /// How many bytes a service name may contain when doing a remote resolve.
+#[cfg(test)]
+#[allow(dead_code)]
 const MAX_NAME_LEN: usize = 1024;
 
 /// Default I/O timeout if the runtime has not overridden it.
+#[cfg(test)]
+#[allow(dead_code)]
 const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Global connection pool for multiplexing outgoing messages to remote peers.

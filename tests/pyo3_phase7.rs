@@ -2,7 +2,7 @@
 #![cfg(feature = "pyo3")]
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyDict;
 use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -115,7 +115,7 @@ result = loop.run_until_complete(run_discovery(rt, addr))
             .unwrap();
 
         // Spawn an observed handler to watch another actor
-        let observer_pid: u64 = rt
+        let _observer_pid: u64 = rt
             .call_method1("spawn_observed_handler", (10usize,))
             .unwrap()
             .extract()

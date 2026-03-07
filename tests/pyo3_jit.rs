@@ -100,7 +100,7 @@ async fn py_jit_offload_decorator_async() {
         let offcall = module.getattr(py, "offload_call").unwrap();
         let args = PyTuple::new(py, &[3_i32]);
         let ret: i32 = offcall
-            .call1(py, (foo.clone(), args.clone(), Option::<&PyDict>::None))
+            .call1(py, (foo.clone(), args, Option::<&PyDict>::None))
             .unwrap()
             .extract(py)
             .unwrap();

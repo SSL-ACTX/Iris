@@ -56,7 +56,7 @@ def named_handler(msg, results=results):
     // Small sleep for async processing
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    Python::with_gil(|py| {
+    Python::with_gil(|_py| {
         // (Re-accessing the runtime and results would require passing them out,
         // but for a single block test we verify the logic here)
     });

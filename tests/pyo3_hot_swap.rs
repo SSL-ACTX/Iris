@@ -67,6 +67,16 @@ def handler_b(msg, results=results):
     // Allow async processing (Behavior A runs)
     tokio::time::sleep(Duration::from_millis(50)).await;
 
+    // sanity check: ensure the first message was handled by A before swapping
+    Python::with_gil(|py| {
+        let res: Vec<String> = results.extract(py).unwrap();
+        assert!(
+            res.first().map(|s| s == "A:1").unwrap_or(false),
+            "first message was not processed by A before hot swap: {:?}",
+            res
+        );
+    });
+
     // 3. The Twist: Hot Swap to Behavior B
     Python::with_gil(|py| {
         // Call the hot_swap API

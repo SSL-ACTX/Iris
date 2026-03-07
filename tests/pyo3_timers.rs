@@ -6,7 +6,8 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn test_send_after_delivers_message() {
-    Python::with_gil(|py| {
+    // create runtime, spawn actor and schedule timer while holding the GIL
+    let (rt_obj, pid): (PyObject, u64) = Python::with_gil(|py| {
         let module = iris::py::make_module(py).unwrap();
         let rt = module.as_ref(py).getattr("PyRuntime").unwrap().call0().unwrap();
 
@@ -24,10 +25,15 @@ async fn test_send_after_delivers_message() {
             .extract()
             .unwrap();
 
-        // Sleep long enough for delivery
-        std::thread::sleep(Duration::from_millis(120));
+        (rt.into_py(py), pid)
+    });
 
-        // Retrieve observed messages
+    // allow the runtime to process (non-blocking)
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    // now check messages with GIL again
+    Python::with_gil(|py| {
+        let rt = rt_obj.as_ref(py);
         let msgs: Vec<pyo3::PyObject> = rt
             .call_method1("get_messages", (pid,))
             .unwrap()

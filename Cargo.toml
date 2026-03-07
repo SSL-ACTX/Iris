@@ -2,7 +2,7 @@
 name = "iris"
 version = "0.4.0"
 edition = "2021"
-description = "Iris — embedded actor mesh"
+description = "Iris — A hybrid distributed runtime fabric for actors, native compute offload, and cross-language services."
 license = "AGPL-3.0"
 repository = "https://github.com/SSL-ACTX/iris"
 
