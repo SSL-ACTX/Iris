@@ -31,6 +31,7 @@ use crate::py::jit::codegen::{
     compile_jit,
     compile_jit_quantum,
     execute_registered_jit,
+    lookup_jit,
     register_jit,
     register_quantum_jit,
     register_named_jit,
@@ -187,6 +188,7 @@ pub(crate) fn init_py(m: &PyModule) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(register_offload, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(offload_call, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(call_jit, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(call_jit_step_loop_f64, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(configure_jit_logging, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(is_jit_logging_enabled, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(configure_quantum_speculation, m)?)?;
@@ -362,6 +364,48 @@ fn call_jit(
         return res;
     }
     Err(pyo3::exceptions::PyRuntimeError::new_err("no JIT entry found"))
+}
+
+/// Execute a registered scalar 2-arg JIT step function in a Rust loop.
+///
+/// This is used by Python wrappers for recurrence kernels to avoid Python↔Rust
+/// crossing overhead on each iteration.
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn call_jit_step_loop_f64(func: PyObject, seed: f64, count: usize) -> PyResult<f64> {
+    let key = func.as_ptr() as usize;
+    let entry = lookup_jit(key).ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("no JIT entry found")
+    })?;
+
+    if entry.arg_count != 2 {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "step loop requires a 2-argument scalar JIT entry",
+        ));
+    }
+
+    let run = || {
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let mut values = [seed, 0.0_f64];
+        let mut state = seed;
+        for i in 0..count {
+            values[0] = state;
+            values[1] = i as f64;
+            state = f(values.as_ptr());
+        }
+        state
+    };
+
+    match catch_unwind(AssertUnwindSafe(run)) {
+        Ok(out) => Ok(out),
+        Err(payload) => {
+            let msg = panic_payload_to_string(payload);
+            Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "jit panic: {}",
+                msg
+            )))
+        }
+    }
 }
 
 // ------- tests ------------------------------------------------------------

@@ -30,10 +30,16 @@ except ImportError:  # allow tests to import without extension built
     register_offload = None  # type: ignore
     offload_call = None  # type: ignore
     call_jit = None  # type: ignore
+    call_jit_step_loop_f64 = None  # type: ignore
     configure_jit_logging = None  # type: ignore
     is_jit_logging_enabled = None  # type: ignore
     configure_quantum_speculation = None  # type: ignore
     is_quantum_speculation_enabled = None  # type: ignore
+
+try:
+    from .iris import call_jit_step_loop_f64  # type: ignore
+except Exception:
+    call_jit_step_loop_f64 = None  # type: ignore
 
 
 def set_jit_logging(enabled: Optional[bool] = None, env_var: Optional[str] = None) -> bool:
@@ -108,9 +114,100 @@ class _NameSubstituter(ast.NodeTransformer):
         return node
 
 
+def _extract_inline_template_from_callable(
+    fn_obj: Any,
+    fn_globals: Optional[dict[str, Any]] = None,
+    inline_cache: Optional[dict[str, Optional[tuple[list[str], ast.AST]]]] = None,
+) -> Optional[tuple[list[str], ast.AST]]:
+    if not inspect.isfunction(fn_obj):
+        return None
+
+    try:
+        helper_src = textwrap.dedent(inspect.getsource(fn_obj))
+        helper_tree = ast.parse(helper_src)
+    except Exception:
+        return None
+
+    helper_node: Optional[ast.FunctionDef] = None
+    for node in helper_tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == fn_obj.__name__:
+            helper_node = node
+            break
+
+    if helper_node is None:
+        return None
+
+    args = helper_node.args
+    if args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg:
+        return None
+    if args.defaults or args.kw_defaults:
+        return None
+
+    inlined = _extract_inlined_expr_plan(helper_node, fn_globals, inline_cache)
+    if inlined is None:
+        return None
+
+    try:
+        expr_ast = ast.parse(inlined, mode="eval").body
+    except Exception:
+        return None
+
+    params = [arg.arg for arg in helper_node.args.args]
+    return params, expr_ast
+
+
 class _JitExprNormalizer(ast.NodeTransformer):
+    def __init__(
+        self,
+        fn_globals: Optional[dict[str, Any]] = None,
+        inline_cache: Optional[dict[str, Optional[tuple[list[str], ast.AST]]]] = None,
+        active_inline: Optional[set[str]] = None,
+    ) -> None:
+        self.fn_globals = fn_globals or {}
+        self.inline_cache = inline_cache if inline_cache is not None else {}
+        self.active_inline = active_inline if active_inline is not None else set()
+
+    def _maybe_inline_call(self, node: ast.Call) -> Optional[ast.AST]:
+        if node.keywords or not isinstance(node.func, ast.Name):
+            return None
+
+        name = node.func.id
+        if name in self.active_inline:
+            return None
+
+        target = self.fn_globals.get(name)
+        if not inspect.isfunction(target):
+            return None
+
+        if name in self.inline_cache:
+            template = self.inline_cache[name]
+        else:
+            template = _extract_inline_template_from_callable(target, self.fn_globals, self.inline_cache)
+            self.inline_cache[name] = template
+
+        if template is None:
+            return None
+
+        params, body_expr = template
+        if len(params) != len(node.args):
+            return None
+
+        env = {param: copy.deepcopy(arg) for param, arg in zip(params, node.args)}
+        inlined = _subst_expr(
+            body_expr,
+            env,
+            self.fn_globals,
+            self.inline_cache,
+            self.active_inline | {name},
+        )
+        return ast.copy_location(inlined, node)
+
     def visit_Call(self, node: ast.Call) -> ast.AST:
         node = self.generic_visit(node)
+        inlined = self._maybe_inline_call(node)
+        if inlined is not None:
+            return inlined
+
         if isinstance(node.func, ast.Name):
             name = node.func.id
             if name == "pow" and len(node.args) == 2 and not node.keywords:
@@ -122,11 +219,17 @@ class _JitExprNormalizer(ast.NodeTransformer):
         return node
 
 
-def _subst_expr(expr: ast.AST, env: dict[str, ast.AST]) -> ast.AST:
+def _subst_expr(
+    expr: ast.AST,
+    env: dict[str, ast.AST],
+    fn_globals: Optional[dict[str, Any]] = None,
+    inline_cache: Optional[dict[str, Optional[tuple[list[str], ast.AST]]]] = None,
+    active_inline: Optional[set[str]] = None,
+) -> ast.AST:
     out = copy.deepcopy(expr)
     for name, value in env.items():
         out = _NameSubstituter(name, value).visit(out)
-    out = _JitExprNormalizer().visit(out)
+    out = _JitExprNormalizer(fn_globals, inline_cache, active_inline).visit(out)
     return ast.fix_missing_locations(out)
 
 
@@ -149,7 +252,13 @@ def _merge_branch_env(cond_expr: ast.AST, left: dict[str, ast.AST], right: dict[
     return merged
 
 
-def _lower_block(stmts: list[ast.stmt], env: dict[str, ast.AST]) -> tuple[dict[str, ast.AST], Optional[ast.AST]]:
+def _lower_block(
+    stmts: list[ast.stmt],
+    env: dict[str, ast.AST],
+    fn_globals: Optional[dict[str, Any]] = None,
+    inline_cache: Optional[dict[str, Optional[tuple[list[str], ast.AST]]]] = None,
+    active_inline: Optional[set[str]] = None,
+) -> tuple[dict[str, ast.AST], Optional[ast.AST]]:
     current = dict(env)
     for stmt in stmts:
         if isinstance(stmt, ast.Pass):
@@ -158,14 +267,14 @@ def _lower_block(stmts: list[ast.stmt], env: dict[str, ast.AST]) -> tuple[dict[s
         if isinstance(stmt, ast.Return):
             if stmt.value is None:
                 return current, None
-            return current, _subst_expr(stmt.value, current)
+            return current, _subst_expr(stmt.value, current, fn_globals, inline_cache, active_inline)
 
         if (
             isinstance(stmt, ast.Assign)
             and len(stmt.targets) == 1
             and isinstance(stmt.targets[0], ast.Name)
         ):
-            current[stmt.targets[0].id] = _subst_expr(stmt.value, current)
+            current[stmt.targets[0].id] = _subst_expr(stmt.value, current, fn_globals, inline_cache, active_inline)
             continue
 
         if (
@@ -173,22 +282,22 @@ def _lower_block(stmts: list[ast.stmt], env: dict[str, ast.AST]) -> tuple[dict[s
             and isinstance(stmt.target, ast.Name)
             and stmt.value is not None
         ):
-            current[stmt.target.id] = _subst_expr(stmt.value, current)
+            current[stmt.target.id] = _subst_expr(stmt.value, current, fn_globals, inline_cache, active_inline)
             continue
 
         if isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
             target_name = stmt.target.id
             left_expr = copy.deepcopy(current.get(target_name, ast.Name(id=target_name, ctx=ast.Load())))
-            right_expr = _subst_expr(stmt.value, current)
+            right_expr = _subst_expr(stmt.value, current, fn_globals, inline_cache, active_inline)
             current[target_name] = ast.BinOp(left=left_expr, op=copy.deepcopy(stmt.op), right=right_expr)
             current[target_name] = ast.fix_missing_locations(current[target_name])
             continue
 
         if isinstance(stmt, ast.If):
-            cond_expr = _subst_expr(stmt.test, current)
-            then_env, then_ret = _lower_block(list(stmt.body), dict(current))
+            cond_expr = _subst_expr(stmt.test, current, fn_globals, inline_cache, active_inline)
+            then_env, then_ret = _lower_block(list(stmt.body), dict(current), fn_globals, inline_cache, active_inline)
             if stmt.orelse:
-                else_env, else_ret = _lower_block(list(stmt.orelse), dict(current))
+                else_env, else_ret = _lower_block(list(stmt.orelse), dict(current), fn_globals, inline_cache, active_inline)
             else:
                 else_env, else_ret = dict(current), None
 
@@ -208,32 +317,46 @@ def _lower_block(stmts: list[ast.stmt], env: dict[str, ast.AST]) -> tuple[dict[s
     return current, None
 
 
-def _extract_return_expr_plan(fn_node: ast.FunctionDef) -> Optional[tuple[str, list[str]]]:
+def _extract_return_expr_plan(
+    fn_node: ast.FunctionDef,
+    fn_globals: Optional[dict[str, Any]] = None,
+    inline_cache: Optional[dict[str, Optional[tuple[list[str], ast.AST]]]] = None,
+) -> Optional[tuple[str, list[str]]]:
     stmts = _strip_docstring(list(fn_node.body))
     if len(stmts) == 1 and isinstance(stmts[0], ast.Return) and stmts[0].value is not None:
-        return ast.unparse(stmts[0].value), []
+        return ast.unparse(_subst_expr(stmts[0].value, {}, fn_globals, inline_cache)), []
     return None
 
 
-def _extract_inlined_expr_plan(fn_node: ast.FunctionDef) -> Optional[str]:
+def _extract_inlined_expr_plan(
+    fn_node: ast.FunctionDef,
+    fn_globals: Optional[dict[str, Any]] = None,
+    inline_cache: Optional[dict[str, Optional[tuple[list[str], ast.AST]]]] = None,
+) -> Optional[str]:
     stmts = _strip_docstring(list(fn_node.body))
-    _env, ret_expr = _lower_block(stmts, {})
+    _env, ret_expr = _lower_block(stmts, {}, fn_globals, inline_cache)
     if ret_expr is None:
         return None
     return ast.unparse(ret_expr)
 
 
-def _extract_last_return_expr(fn_node: ast.FunctionDef) -> Optional[str]:
+def _extract_last_return_expr(
+    fn_node: ast.FunctionDef,
+    fn_globals: Optional[dict[str, Any]] = None,
+    inline_cache: Optional[dict[str, Optional[tuple[list[str], ast.AST]]]] = None,
+) -> Optional[str]:
     stmts = _strip_docstring(list(fn_node.body))
     for stmt in reversed(stmts):
         if isinstance(stmt, ast.Return) and stmt.value is not None:
-            return ast.unparse(stmt.value)
+            return ast.unparse(_subst_expr(stmt.value, {}, fn_globals, inline_cache))
     return None
 
 
 def _extract_stateful_loop_plan(
     fn_node: ast.FunctionDef,
     arg_names: list[str],
+    fn_globals: Optional[dict[str, Any]] = None,
+    inline_cache: Optional[dict[str, Optional[tuple[list[str], ast.AST]]]] = None,
 ) -> Optional[dict[str, Any]]:
     if len(arg_names) < 2:
         return None
@@ -261,9 +384,7 @@ def _extract_stateful_loop_plan(
     ):
         return None
     state_var = state_assign.targets[0].id
-    seed_var = state_assign.value.id
-    if seed_var != arg_names[0]:
-        return None
+    seed_src = ast.unparse(_subst_expr(state_assign.value, {}, fn_globals, inline_cache))
 
     if not isinstance(loop_stmt, ast.For) or not isinstance(loop_stmt.target, ast.Name):
         return None
@@ -276,19 +397,25 @@ def _extract_stateful_loop_plan(
     ):
         return None
     range_arg = loop_stmt.iter.args[0]
+    count_arg: Optional[str] = None
     if isinstance(range_arg, ast.Name):
-        if range_arg.id != arg_names[1]:
+        if range_arg.id not in arg_names:
             return None
+        count_arg = range_arg.id
     elif (
         isinstance(range_arg, ast.Call)
         and isinstance(range_arg.func, ast.Name)
         and range_arg.func.id == "int"
         and len(range_arg.args) == 1
         and isinstance(range_arg.args[0], ast.Name)
-        and range_arg.args[0].id == arg_names[1]
     ):
-        pass
+        if range_arg.args[0].id not in arg_names:
+            return None
+        count_arg = range_arg.args[0].id
     else:
+        return None
+
+    if count_arg is None:
         return None
 
     if not (
@@ -323,9 +450,13 @@ def _extract_stateful_loop_plan(
             and isinstance(stmt.targets[0], ast.Name)
             and stmt.targets[0].id == state_var
         ):
-            rhs = copy.deepcopy(stmt.value)
-            state_expr = _NameSubstituter(state_var, state_expr).visit(rhs)
-            state_expr = ast.fix_missing_locations(state_expr)
+            rhs = ast.fix_missing_locations(copy.deepcopy(stmt.value))
+            state_expr = _subst_expr(
+                rhs,
+                {state_var: state_expr},
+                fn_globals,
+                inline_cache,
+            )
             continue
 
         if (
@@ -338,16 +469,20 @@ def _extract_stateful_loop_plan(
                 op=stmt.op,
                 right=copy.deepcopy(stmt.value),
             )
-            state_expr = _NameSubstituter(state_var, state_expr).visit(rhs)
-            state_expr = ast.fix_missing_locations(state_expr)
+            state_expr = _subst_expr(
+                rhs,
+                {state_var: state_expr},
+                fn_globals,
+                inline_cache,
+            )
             continue
 
         return None
 
     step_src = ast.unparse(state_expr)
     return {
-        "seed_arg": arg_names[0],
-        "count_arg": arg_names[1],
+        "count_arg": count_arg,
+        "seed_src": seed_src,
         "iter_var": iter_var,
         "step_src": step_src,
         "step_args": [state_var, iter_var],
@@ -357,8 +492,10 @@ def _extract_stateful_loop_plan(
 def _extract_scalar_while_plan(
     fn_node: ast.FunctionDef,
     arg_names: list[str],
+    fn_globals: Optional[dict[str, Any]] = None,
+    inline_cache: Optional[dict[str, Optional[tuple[list[str], ast.AST]]]] = None,
 ) -> Optional[dict[str, Any]]:
-    if len(arg_names) < 2:
+    if len(arg_names) < 1:
         return None
 
     stmts = _strip_docstring(list(fn_node.body))
@@ -393,6 +530,7 @@ def _extract_scalar_while_plan(
         return None
 
     test = while_stmt.test
+    count_arg: Optional[str] = None
     if not (
         isinstance(test, ast.Compare)
         and isinstance(test.left, ast.Name)
@@ -401,9 +539,11 @@ def _extract_scalar_while_plan(
         and isinstance(test.ops[0], ast.Lt)
         and len(test.comparators) == 1
         and isinstance(test.comparators[0], ast.Name)
-        and test.comparators[0].id == arg_names[1]
     ):
         return None
+    if test.comparators[0].id not in arg_names:
+        return None
+    count_arg = test.comparators[0].id
 
     if not (
         isinstance(ret_stmt, ast.Return)
@@ -438,9 +578,13 @@ def _extract_scalar_while_plan(
             and isinstance(stmt.targets[0], ast.Name)
             and stmt.targets[0].id == state_var
         ):
-            rhs = copy.deepcopy(stmt.value)
-            state_expr = _NameSubstituter(state_var, state_expr).visit(rhs)
-            state_expr = ast.fix_missing_locations(state_expr)
+            rhs = ast.fix_missing_locations(copy.deepcopy(stmt.value))
+            state_expr = _subst_expr(
+                rhs,
+                {state_var: state_expr},
+                fn_globals,
+                inline_cache,
+            )
             continue
         if (
             isinstance(stmt, ast.AugAssign)
@@ -452,17 +596,20 @@ def _extract_scalar_while_plan(
                 op=stmt.op,
                 right=copy.deepcopy(stmt.value),
             )
-            state_expr = _NameSubstituter(state_var, state_expr).visit(rhs)
-            state_expr = ast.fix_missing_locations(state_expr)
+            state_expr = _subst_expr(
+                rhs,
+                {state_var: state_expr},
+                fn_globals,
+                inline_cache,
+            )
             continue
         return None
 
     return {
-        "seed_arg": arg_names[0],
-        "count_arg": arg_names[1],
+        "count_arg": count_arg,
         "iter_var": iter_var,
         "state_var": state_var,
-        "seed_src": ast.unparse(seed_expr),
+        "seed_src": ast.unparse(_subst_expr(seed_expr, {}, fn_globals, inline_cache)),
         "step_src": ast.unparse(state_expr),
         "step_args": [state_var, iter_var],
     }
@@ -471,8 +618,10 @@ def _extract_scalar_while_plan(
 def _extract_scalar_for_plan(
     fn_node: ast.FunctionDef,
     arg_names: list[str],
+    fn_globals: Optional[dict[str, Any]] = None,
+    inline_cache: Optional[dict[str, Optional[tuple[list[str], ast.AST]]]] = None,
 ) -> Optional[dict[str, Any]]:
-    if len(arg_names) < 2:
+    if len(arg_names) < 1:
         return None
 
     stmts = _strip_docstring(list(fn_node.body))
@@ -480,7 +629,15 @@ def _extract_scalar_for_plan(
         return None
 
     state_init = stmts[0]
-    for_stmt = stmts[1]
+    for_idx: Optional[int] = None
+    for idx, stmt in enumerate(stmts[1:-1], start=1):
+        if isinstance(stmt, ast.For):
+            for_idx = idx
+            break
+    if for_idx is None:
+        return None
+
+    for_stmt = stmts[for_idx]
     ret_stmt = stmts[-1]
 
     if not (
@@ -494,6 +651,36 @@ def _extract_scalar_for_plan(
 
     if not (isinstance(for_stmt, ast.For) and isinstance(for_stmt.target, ast.Name)):
         return None
+
+    alias_count_map: dict[str, str] = {}
+    for pre_stmt in stmts[1:for_idx]:
+        if not (
+            isinstance(pre_stmt, ast.Assign)
+            and len(pre_stmt.targets) == 1
+            and isinstance(pre_stmt.targets[0], ast.Name)
+        ):
+            return None
+        alias_name = pre_stmt.targets[0].id
+        if alias_name == state_var:
+            return None
+
+        value = pre_stmt.value
+        if isinstance(value, ast.Name) and value.id in arg_names:
+            alias_count_map[alias_name] = value.id
+            continue
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "int"
+            and len(value.args) == 1
+            and isinstance(value.args[0], ast.Name)
+            and value.args[0].id in arg_names
+        ):
+            alias_count_map[alias_name] = value.args[0].id
+            continue
+
+        return None
+
     iter_var = for_stmt.target.id
     if not (
         isinstance(for_stmt.iter, ast.Call)
@@ -504,8 +691,13 @@ def _extract_scalar_for_plan(
         return None
 
     range_arg = for_stmt.iter.args[0]
+    count_arg: Optional[str] = None
     if isinstance(range_arg, ast.Name):
-        if range_arg.id != arg_names[1]:
+        if range_arg.id in arg_names:
+            count_arg = range_arg.id
+        elif range_arg.id in alias_count_map:
+            count_arg = alias_count_map[range_arg.id]
+        else:
             return None
     elif (
         isinstance(range_arg, ast.Call)
@@ -513,10 +705,14 @@ def _extract_scalar_for_plan(
         and range_arg.func.id == "int"
         and len(range_arg.args) == 1
         and isinstance(range_arg.args[0], ast.Name)
-        and range_arg.args[0].id == arg_names[1]
     ):
-        pass
+        if range_arg.args[0].id not in arg_names:
+            return None
+        count_arg = range_arg.args[0].id
     else:
+        return None
+
+    if count_arg is None:
         return None
 
     if not (
@@ -540,9 +736,13 @@ def _extract_scalar_for_plan(
             and isinstance(stmt.targets[0], ast.Name)
             and stmt.targets[0].id == state_var
         ):
-            rhs = copy.deepcopy(stmt.value)
-            state_expr = _NameSubstituter(state_var, state_expr).visit(rhs)
-            state_expr = ast.fix_missing_locations(state_expr)
+            rhs = ast.fix_missing_locations(copy.deepcopy(stmt.value))
+            state_expr = _subst_expr(
+                rhs,
+                {state_var: state_expr},
+                fn_globals,
+                inline_cache,
+            )
             continue
         if (
             isinstance(stmt, ast.AugAssign)
@@ -554,17 +754,20 @@ def _extract_scalar_for_plan(
                 op=stmt.op,
                 right=copy.deepcopy(stmt.value),
             )
-            state_expr = _NameSubstituter(state_var, state_expr).visit(rhs)
-            state_expr = ast.fix_missing_locations(state_expr)
+            state_expr = _subst_expr(
+                rhs,
+                {state_var: state_expr},
+                fn_globals,
+                inline_cache,
+            )
             continue
         return None
 
     return {
-        "seed_arg": arg_names[0],
-        "count_arg": arg_names[1],
+        "count_arg": count_arg,
         "iter_var": iter_var,
         "state_var": state_var,
-        "seed_src": ast.unparse(seed_expr),
+        "seed_src": ast.unparse(_subst_expr(seed_expr, {}, fn_globals, inline_cache)),
         "step_src": ast.unparse(state_expr),
         "step_args": [state_var, iter_var],
     }
@@ -617,6 +820,8 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
     """
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        inline_cache: dict[str, Optional[tuple[list[str], ast.AST]]] = {}
+        jit_eval_globals: dict[str, Any] = func.__globals__
         src: Optional[str] = None
         arg_names: Optional[list[str]] = None
         loop_plan: Optional[dict[str, Any]] = None
@@ -632,25 +837,32 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                 tree = ast.parse(src_txt)
                 sig = inspect.signature(func)
                 arg_names = list(sig.parameters.keys())
+                try:
+                    closure_vars = inspect.getclosurevars(func)
+                    inline_ns = dict(func.__globals__)
+                    inline_ns.update(closure_vars.nonlocals)
+                    jit_eval_globals = inline_ns
+                except Exception:
+                    jit_eval_globals = func.__globals__
 
                 for node in tree.body:
                     if isinstance(node, ast.FunctionDef) and node.body:
-                        expr_plan = _extract_return_expr_plan(node)
+                        expr_plan = _extract_return_expr_plan(node, jit_eval_globals, inline_cache)
                         if expr_plan is not None:
                             src, _ = expr_plan
                         else:
-                            inlined = _extract_inlined_expr_plan(node)
+                            inlined = _extract_inlined_expr_plan(node, jit_eval_globals, inline_cache)
                             if inlined is not None:
                                 src = inlined
                             else:
                                 src = None
                                 if arg_names is not None:
-                                    loop_plan = _extract_stateful_loop_plan(node, arg_names)
+                                    loop_plan = _extract_stateful_loop_plan(node, arg_names, jit_eval_globals, inline_cache)
                                     if loop_plan is None:
-                                        scalar_while_plan = _extract_scalar_while_plan(node, arg_names)
+                                        scalar_while_plan = _extract_scalar_while_plan(node, arg_names, jit_eval_globals, inline_cache)
                                         if scalar_while_plan is None:
-                                            scalar_for_plan = _extract_scalar_for_plan(node, arg_names)
-                                aggressive_src = _extract_last_return_expr(node)
+                                            scalar_for_plan = _extract_scalar_for_plan(node, arg_names, jit_eval_globals, inline_cache)
+                                aggressive_src = _extract_last_return_expr(node, jit_eval_globals, inline_cache)
                         break
             except Exception:
                 pass
@@ -746,13 +958,13 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
             if loop_plan is not None and register_offload is not None and sig is not None:
                 step_src = loop_plan["step_src"]
                 step_args = loop_plan["step_args"]
-                seed_arg = loop_plan["seed_arg"]
+                seed_src = loop_plan["seed_src"]
                 count_arg = loop_plan["count_arg"]
                 iter_var = loop_plan["iter_var"]
 
                 def _iris_step(x: float, i: float) -> float:
                     namespace = {step_args[0]: x, step_args[1]: i}
-                    return float(eval(step_src, func.__globals__, namespace))
+                    return float(eval(step_src, jit_eval_globals, namespace))
 
                 try:
                     register_offload(_iris_step, "jit", "float", step_src, step_args)
@@ -766,11 +978,12 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                     except Exception:
                         return func(*args, **kwargs)
                     bound.apply_defaults()
-                    if seed_arg not in bound.arguments or count_arg not in bound.arguments:
+                    if count_arg not in bound.arguments:
                         return func(*args, **kwargs)
 
+                    local_seed_ns = dict(bound.arguments)
                     try:
-                        state = float(bound.arguments[seed_arg])
+                        state = float(eval(seed_src, jit_eval_globals, local_seed_ns))
                         count = int(bound.arguments[count_arg])
                     except Exception:
                         return func(*args, **kwargs)
@@ -791,7 +1004,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                                 or "jit panic" in msg
                             ):
                                 local_ns = {step_args[0]: state, iter_var: i, step_args[1]: iter_val}
-                                state = float(eval(step_src, func.__globals__, local_ns))
+                                state = float(eval(step_src, jit_eval_globals, local_ns))
                             else:
                                 raise
                         out.append(state)
@@ -802,14 +1015,13 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
             if scalar_while_plan is not None and register_offload is not None and sig is not None:
                 step_src = scalar_while_plan["step_src"]
                 step_args = scalar_while_plan["step_args"]
-                seed_arg = scalar_while_plan["seed_arg"]
                 count_arg = scalar_while_plan["count_arg"]
                 iter_var = scalar_while_plan["iter_var"]
                 seed_src = scalar_while_plan["seed_src"]
 
                 def _iris_step(x: float, i: float) -> float:
                     namespace = {step_args[0]: x, step_args[1]: i}
-                    return float(eval(step_src, func.__globals__, namespace))
+                    return float(eval(step_src, jit_eval_globals, namespace))
 
                 try:
                     register_offload(_iris_step, "jit", "float", step_src, step_args)
@@ -826,18 +1038,31 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                     except Exception:
                         return func(*args, **kwargs)
                     bound.apply_defaults()
-                    if seed_arg not in bound.arguments or count_arg not in bound.arguments:
+                    if count_arg not in bound.arguments:
                         return func(*args, **kwargs)
 
                     local_seed_ns = dict(bound.arguments)
                     try:
-                        state = float(eval(seed_src, func.__globals__, local_seed_ns))
+                        state = float(eval(seed_src, jit_eval_globals, local_seed_ns))
                         count = int(bound.arguments[count_arg])
                     except Exception:
                         return func(*args, **kwargs)
 
                     if count <= 0:
                         return state
+
+                    if call_jit_step_loop_f64 is not None:
+                        try:
+                            return float(call_jit_step_loop_f64(_iris_step, state, count))
+                        except RuntimeError as e:
+                            msg = str(e)
+                            if not (
+                                "no JIT entry" in msg
+                                or "failed to compile" in msg
+                                or "jit panic" in msg
+                                or "step loop requires" in msg
+                            ):
+                                raise
 
                     for i in range(count):
                         iter_val = float(i)
@@ -851,7 +1076,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                                 or "jit panic" in msg
                             ):
                                 local_ns = {step_args[0]: state, iter_var: i, step_args[1]: iter_val}
-                                state = float(eval(step_src, func.__globals__, local_ns))
+                                state = float(eval(step_src, jit_eval_globals, local_ns))
                             else:
                                 raise
                     return state
@@ -861,14 +1086,13 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
             if scalar_for_plan is not None and register_offload is not None and sig is not None:
                 step_src = scalar_for_plan["step_src"]
                 step_args = scalar_for_plan["step_args"]
-                seed_arg = scalar_for_plan["seed_arg"]
                 count_arg = scalar_for_plan["count_arg"]
                 iter_var = scalar_for_plan["iter_var"]
                 seed_src = scalar_for_plan["seed_src"]
 
                 def _iris_step(x: float, i: float) -> float:
                     namespace = {step_args[0]: x, step_args[1]: i}
-                    return float(eval(step_src, func.__globals__, namespace))
+                    return float(eval(step_src, jit_eval_globals, namespace))
 
                 try:
                     register_offload(_iris_step, "jit", "float", step_src, step_args)
@@ -885,18 +1109,31 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                     except Exception:
                         return func(*args, **kwargs)
                     bound.apply_defaults()
-                    if seed_arg not in bound.arguments or count_arg not in bound.arguments:
+                    if count_arg not in bound.arguments:
                         return func(*args, **kwargs)
 
                     local_seed_ns = dict(bound.arguments)
                     try:
-                        state = float(eval(seed_src, func.__globals__, local_seed_ns))
+                        state = float(eval(seed_src, jit_eval_globals, local_seed_ns))
                         count = int(bound.arguments[count_arg])
                     except Exception:
                         return func(*args, **kwargs)
 
                     if count <= 0:
                         return state
+
+                    if call_jit_step_loop_f64 is not None:
+                        try:
+                            return float(call_jit_step_loop_f64(_iris_step, state, count))
+                        except RuntimeError as e:
+                            msg = str(e)
+                            if not (
+                                "no JIT entry" in msg
+                                or "failed to compile" in msg
+                                or "jit panic" in msg
+                                or "step loop requires" in msg
+                            ):
+                                raise
 
                     for i in range(count):
                         iter_val = float(i)
@@ -910,7 +1147,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                                 or "jit panic" in msg
                             ):
                                 local_ns = {step_args[0]: state, iter_var: i, step_args[1]: iter_val}
-                                state = float(eval(step_src, func.__globals__, local_ns))
+                                state = float(eval(step_src, jit_eval_globals, local_ns))
                             else:
                                 raise
                     return state

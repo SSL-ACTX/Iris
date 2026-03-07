@@ -477,3 +477,43 @@ async fn py_jit_offload_decorator_async() {
         assert_eq!(ret3, 6.0);
     });
 }
+
+#[tokio::test]
+async fn py_jit_step_loop_api_executes_in_rust() {
+    pyo3::prepare_freethreaded_python();
+
+    Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let register = module
+            .getattr(py, "register_offload")
+            .expect("register_offload not present");
+        let step_loop = module
+            .getattr(py, "call_jit_step_loop_f64")
+            .expect("call_jit_step_loop_f64 not present");
+
+        let locals = PyDict::new(py);
+        py.run("def step(x, i): return x + i + 1", None, Some(locals))
+            .unwrap();
+        let step = locals.get_item("step").unwrap().to_object(py);
+
+        let _ = register
+            .call1(
+                py,
+                (
+                    step.clone(),
+                    Some("jit"),
+                    Some("float"),
+                    Some("x + i + 1".to_string()),
+                    Some(vec!["x".to_string(), "i".to_string()]),
+                ),
+            )
+            .unwrap();
+
+        let out: f64 = step_loop
+            .call1(py, (step, 0.0_f64, 3_usize))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(out, 6.0);
+    });
+}

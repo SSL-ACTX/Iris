@@ -338,6 +338,7 @@ class TestJitFallback(unittest.TestCase):
     def test_scalar_while_uses_step_jit(self):
         original_call_jit = jit_mod.call_jit
         original_register_offload = jit_mod.register_offload
+        original_step_loop = jit_mod.call_jit_step_loop_f64
 
         calls = {"jit": 0, "register": 0}
 
@@ -352,6 +353,7 @@ class TestJitFallback(unittest.TestCase):
 
             jit_mod.call_jit = fake_call_jit
             jit_mod.register_offload = fake_register_offload
+            jit_mod.call_jit_step_loop_f64 = None
 
             @jit_mod.offload(strategy="jit", return_type="float")
             def scalar_loop(seed, n):
@@ -369,10 +371,12 @@ class TestJitFallback(unittest.TestCase):
         finally:
             jit_mod.call_jit = original_call_jit
             jit_mod.register_offload = original_register_offload
+            jit_mod.call_jit_step_loop_f64 = original_step_loop
 
     def test_scalar_for_uses_step_jit(self):
         original_call_jit = jit_mod.call_jit
         original_register_offload = jit_mod.register_offload
+        original_step_loop = jit_mod.call_jit_step_loop_f64
 
         calls = {"jit": 0, "register": 0}
 
@@ -387,6 +391,7 @@ class TestJitFallback(unittest.TestCase):
 
             jit_mod.call_jit = fake_call_jit
             jit_mod.register_offload = fake_register_offload
+            jit_mod.call_jit_step_loop_f64 = None
 
             @jit_mod.offload(strategy="jit", return_type="float")
             def scalar_for(seed, n):
@@ -402,6 +407,44 @@ class TestJitFallback(unittest.TestCase):
         finally:
             jit_mod.call_jit = original_call_jit
             jit_mod.register_offload = original_register_offload
+            jit_mod.call_jit_step_loop_f64 = original_step_loop
+
+    def test_scalar_for_prefers_rust_step_loop_api(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+        original_step_loop = jit_mod.call_jit_step_loop_f64
+
+        calls = {"step_loop": 0}
+
+        try:
+            jit_mod.call_jit = lambda _func, _args, _kwargs: (_ for _ in ()).throw(
+                AssertionError("per-iteration call_jit should not be used when step loop API is available")
+            )
+            jit_mod.register_offload = lambda *a, **k: None
+
+            def fake_step_loop(step_fn, seed, count):
+                calls["step_loop"] += 1
+                state = float(seed)
+                for i in range(int(count)):
+                    state = float(step_fn(state, float(i)))
+                return state
+
+            jit_mod.call_jit_step_loop_f64 = fake_step_loop
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def scalar_for(seed, n):
+                x = seed
+                for i in range(n):
+                    x = x + i + 1
+                return x
+
+            out = scalar_for(0.0, 3)
+            self.assertEqual(out, 6.0)
+            self.assertEqual(calls["step_loop"], 1)
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+            jit_mod.call_jit_step_loop_f64 = original_step_loop
 
     def test_scalar_for_vector_inputs_fallback(self):
         original_call_jit = jit_mod.call_jit
@@ -427,6 +470,45 @@ class TestJitFallback(unittest.TestCase):
         finally:
             jit_mod.call_jit = original_call_jit
             jit_mod.register_offload = original_register_offload
+
+    def test_scalar_for_inlines_helper_call_into_step_src(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+        original_step_loop = jit_mod.call_jit_step_loop_f64
+
+        seen = {"step_src": None}
+
+        try:
+            def fake_call_jit(_func, _args, _kwargs):
+                return _func(*_args)
+
+            def fake_register_offload(_func, _strategy, _return_type, src, _arg_names):
+                if src is not None and isinstance(_arg_names, list) and _arg_names == ["x", "i"]:
+                    seen["step_src"] = src
+                return None
+
+            jit_mod.call_jit = fake_call_jit
+            jit_mod.register_offload = fake_register_offload
+            jit_mod.call_jit_step_loop_f64 = None
+
+            def helper_calc(a, b):
+                return (a * b) + (a - b)
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def scalar_for(seed, n):
+                x = seed
+                for i in range(int(n)):
+                    x += helper_calc(x * 0.0001, float(i) * 0.001)
+                return x
+
+            out = scalar_for(1.0, 3.0)
+            self.assertIsInstance(out, float)
+            self.assertIsNotNone(seen["step_src"])
+            self.assertNotIn("helper_calc", str(seen["step_src"]))
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+            jit_mod.call_jit_step_loop_f64 = original_step_loop
 
 
 if __name__ == "__main__":
