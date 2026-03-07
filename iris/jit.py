@@ -108,10 +108,25 @@ class _NameSubstituter(ast.NodeTransformer):
         return node
 
 
+class _JitExprNormalizer(ast.NodeTransformer):
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        node = self.generic_visit(node)
+        if isinstance(node.func, ast.Name):
+            name = node.func.id
+            if name == "pow" and len(node.args) == 2 and not node.keywords:
+                return ast.BinOp(
+                    left=copy.deepcopy(node.args[0]),
+                    op=ast.Pow(),
+                    right=copy.deepcopy(node.args[1]),
+                )
+        return node
+
+
 def _subst_expr(expr: ast.AST, env: dict[str, ast.AST]) -> ast.AST:
     out = copy.deepcopy(expr)
     for name, value in env.items():
         out = _NameSubstituter(name, value).visit(out)
+    out = _JitExprNormalizer().visit(out)
     return ast.fix_missing_locations(out)
 
 
@@ -137,6 +152,9 @@ def _merge_branch_env(cond_expr: ast.AST, left: dict[str, ast.AST], right: dict[
 def _lower_block(stmts: list[ast.stmt], env: dict[str, ast.AST]) -> tuple[dict[str, ast.AST], Optional[ast.AST]]:
     current = dict(env)
     for stmt in stmts:
+        if isinstance(stmt, ast.Pass):
+            continue
+
         if isinstance(stmt, ast.Return):
             if stmt.value is None:
                 return current, None
@@ -150,6 +168,14 @@ def _lower_block(stmts: list[ast.stmt], env: dict[str, ast.AST]) -> tuple[dict[s
             current[stmt.targets[0].id] = _subst_expr(stmt.value, current)
             continue
 
+        if (
+            isinstance(stmt, ast.AnnAssign)
+            and isinstance(stmt.target, ast.Name)
+            and stmt.value is not None
+        ):
+            current[stmt.target.id] = _subst_expr(stmt.value, current)
+            continue
+
         if isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
             target_name = stmt.target.id
             left_expr = copy.deepcopy(current.get(target_name, ast.Name(id=target_name, ctx=ast.Load())))
@@ -161,7 +187,10 @@ def _lower_block(stmts: list[ast.stmt], env: dict[str, ast.AST]) -> tuple[dict[s
         if isinstance(stmt, ast.If):
             cond_expr = _subst_expr(stmt.test, current)
             then_env, then_ret = _lower_block(list(stmt.body), dict(current))
-            else_env, else_ret = _lower_block(list(stmt.orelse), dict(current))
+            if stmt.orelse:
+                else_env, else_ret = _lower_block(list(stmt.orelse), dict(current))
+            else:
+                else_env, else_ret = dict(current), None
 
             if then_ret is not None and else_ret is not None:
                 return current, ast.IfExp(test=cond_expr, body=then_ret, orelse=else_ret)
@@ -325,6 +354,222 @@ def _extract_stateful_loop_plan(
     }
 
 
+def _extract_scalar_while_plan(
+    fn_node: ast.FunctionDef,
+    arg_names: list[str],
+) -> Optional[dict[str, Any]]:
+    if len(arg_names) < 2:
+        return None
+
+    stmts = _strip_docstring(list(fn_node.body))
+    if len(stmts) < 4:
+        return None
+
+    state_init = stmts[0]
+    iter_init = stmts[1]
+    while_stmt = stmts[2]
+    ret_stmt = stmts[-1]
+
+    if not (
+        isinstance(state_init, ast.Assign)
+        and len(state_init.targets) == 1
+        and isinstance(state_init.targets[0], ast.Name)
+    ):
+        return None
+    state_var = state_init.targets[0].id
+    seed_expr = state_init.value
+
+    if not (
+        isinstance(iter_init, ast.Assign)
+        and len(iter_init.targets) == 1
+        and isinstance(iter_init.targets[0], ast.Name)
+        and isinstance(iter_init.value, ast.Constant)
+        and iter_init.value.value == 0
+    ):
+        return None
+    iter_var = iter_init.targets[0].id
+
+    if not isinstance(while_stmt, ast.While):
+        return None
+
+    test = while_stmt.test
+    if not (
+        isinstance(test, ast.Compare)
+        and isinstance(test.left, ast.Name)
+        and test.left.id == iter_var
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Lt)
+        and len(test.comparators) == 1
+        and isinstance(test.comparators[0], ast.Name)
+        and test.comparators[0].id == arg_names[1]
+    ):
+        return None
+
+    if not (
+        isinstance(ret_stmt, ast.Return)
+        and isinstance(ret_stmt.value, ast.Name)
+        and ret_stmt.value.id == state_var
+    ):
+        return None
+
+    body = list(while_stmt.body)
+    if not body:
+        return None
+
+    inc_stmt = body[-1]
+    valid_inc = (
+        isinstance(inc_stmt, ast.AugAssign)
+        and isinstance(inc_stmt.target, ast.Name)
+        and inc_stmt.target.id == iter_var
+        and isinstance(inc_stmt.op, ast.Add)
+        and isinstance(inc_stmt.value, ast.Constant)
+        and inc_stmt.value.value == 1
+    )
+    if not valid_inc:
+        return None
+
+    state_expr: ast.AST = ast.Name(id=state_var, ctx=ast.Load())
+    for stmt in body[:-1]:
+        if isinstance(stmt, ast.Pass):
+            continue
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and stmt.targets[0].id == state_var
+        ):
+            rhs = copy.deepcopy(stmt.value)
+            state_expr = _NameSubstituter(state_var, state_expr).visit(rhs)
+            state_expr = ast.fix_missing_locations(state_expr)
+            continue
+        if (
+            isinstance(stmt, ast.AugAssign)
+            and isinstance(stmt.target, ast.Name)
+            and stmt.target.id == state_var
+        ):
+            rhs = ast.BinOp(
+                left=ast.Name(id=state_var, ctx=ast.Load()),
+                op=stmt.op,
+                right=copy.deepcopy(stmt.value),
+            )
+            state_expr = _NameSubstituter(state_var, state_expr).visit(rhs)
+            state_expr = ast.fix_missing_locations(state_expr)
+            continue
+        return None
+
+    return {
+        "seed_arg": arg_names[0],
+        "count_arg": arg_names[1],
+        "iter_var": iter_var,
+        "state_var": state_var,
+        "seed_src": ast.unparse(seed_expr),
+        "step_src": ast.unparse(state_expr),
+        "step_args": [state_var, iter_var],
+    }
+
+
+def _extract_scalar_for_plan(
+    fn_node: ast.FunctionDef,
+    arg_names: list[str],
+) -> Optional[dict[str, Any]]:
+    if len(arg_names) < 2:
+        return None
+
+    stmts = _strip_docstring(list(fn_node.body))
+    if len(stmts) < 3:
+        return None
+
+    state_init = stmts[0]
+    for_stmt = stmts[1]
+    ret_stmt = stmts[-1]
+
+    if not (
+        isinstance(state_init, ast.Assign)
+        and len(state_init.targets) == 1
+        and isinstance(state_init.targets[0], ast.Name)
+    ):
+        return None
+    state_var = state_init.targets[0].id
+    seed_expr = state_init.value
+
+    if not (isinstance(for_stmt, ast.For) and isinstance(for_stmt.target, ast.Name)):
+        return None
+    iter_var = for_stmt.target.id
+    if not (
+        isinstance(for_stmt.iter, ast.Call)
+        and isinstance(for_stmt.iter.func, ast.Name)
+        and for_stmt.iter.func.id == "range"
+        and len(for_stmt.iter.args) == 1
+    ):
+        return None
+
+    range_arg = for_stmt.iter.args[0]
+    if isinstance(range_arg, ast.Name):
+        if range_arg.id != arg_names[1]:
+            return None
+    elif (
+        isinstance(range_arg, ast.Call)
+        and isinstance(range_arg.func, ast.Name)
+        and range_arg.func.id == "int"
+        and len(range_arg.args) == 1
+        and isinstance(range_arg.args[0], ast.Name)
+        and range_arg.args[0].id == arg_names[1]
+    ):
+        pass
+    else:
+        return None
+
+    if not (
+        isinstance(ret_stmt, ast.Return)
+        and isinstance(ret_stmt.value, ast.Name)
+        and ret_stmt.value.id == state_var
+    ):
+        return None
+
+    body = list(for_stmt.body)
+    if not body:
+        return None
+
+    state_expr: ast.AST = ast.Name(id=state_var, ctx=ast.Load())
+    for stmt in body:
+        if isinstance(stmt, ast.Pass):
+            continue
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and stmt.targets[0].id == state_var
+        ):
+            rhs = copy.deepcopy(stmt.value)
+            state_expr = _NameSubstituter(state_var, state_expr).visit(rhs)
+            state_expr = ast.fix_missing_locations(state_expr)
+            continue
+        if (
+            isinstance(stmt, ast.AugAssign)
+            and isinstance(stmt.target, ast.Name)
+            and stmt.target.id == state_var
+        ):
+            rhs = ast.BinOp(
+                left=ast.Name(id=state_var, ctx=ast.Load()),
+                op=stmt.op,
+                right=copy.deepcopy(stmt.value),
+            )
+            state_expr = _NameSubstituter(state_var, state_expr).visit(rhs)
+            state_expr = ast.fix_missing_locations(state_expr)
+            continue
+        return None
+
+    return {
+        "seed_arg": arg_names[0],
+        "count_arg": arg_names[1],
+        "iter_var": iter_var,
+        "state_var": state_var,
+        "seed_src": ast.unparse(seed_expr),
+        "step_src": ast.unparse(state_expr),
+        "step_args": [state_var, iter_var],
+    }
+
+
 def _is_vector_like(value: Any) -> bool:
     if isinstance(value, (str, bytes, bytearray, dict)):
         return False
@@ -375,6 +620,8 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
         src: Optional[str] = None
         arg_names: Optional[list[str]] = None
         loop_plan: Optional[dict[str, Any]] = None
+        scalar_while_plan: Optional[dict[str, Any]] = None
+        scalar_for_plan: Optional[dict[str, Any]] = None
         aggressive_src: Optional[str] = None
         sig: Optional[inspect.Signature] = None
 
@@ -399,6 +646,10 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                                 src = None
                                 if arg_names is not None:
                                     loop_plan = _extract_stateful_loop_plan(node, arg_names)
+                                    if loop_plan is None:
+                                        scalar_while_plan = _extract_scalar_while_plan(node, arg_names)
+                                        if scalar_while_plan is None:
+                                            scalar_for_plan = _extract_scalar_for_plan(node, arg_names)
                                 aggressive_src = _extract_last_return_expr(node)
                         break
             except Exception:
@@ -418,7 +669,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
             return actor_wrapper
             
         elif strategy == "jit" and call_jit is not None:
-            if src is None and loop_plan is None:
+            if src is None and loop_plan is None and scalar_while_plan is None and scalar_for_plan is None:
                 if aggressive_src is not None and arg_names is not None and register_offload is not None:
                     try:
                         register_offload(func, strategy, return_type, aggressive_src, arg_names)
@@ -547,6 +798,124 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                     return out
 
                 return loop_jit_wrapper
+
+            if scalar_while_plan is not None and register_offload is not None and sig is not None:
+                step_src = scalar_while_plan["step_src"]
+                step_args = scalar_while_plan["step_args"]
+                seed_arg = scalar_while_plan["seed_arg"]
+                count_arg = scalar_while_plan["count_arg"]
+                iter_var = scalar_while_plan["iter_var"]
+                seed_src = scalar_while_plan["seed_src"]
+
+                def _iris_step(x: float, i: float) -> float:
+                    namespace = {step_args[0]: x, step_args[1]: i}
+                    return float(eval(step_src, func.__globals__, namespace))
+
+                try:
+                    register_offload(_iris_step, "jit", "float", step_src, step_args)
+                except Exception:
+                    return func
+
+                @functools.wraps(func)
+                def while_jit_wrapper(*args: Any, **kwargs: Any) -> Any:
+                    if any(_is_vector_like(a) for a in args):
+                        return _vectorized_python_fallback(func, args, kwargs)
+
+                    try:
+                        bound = sig.bind_partial(*args, **kwargs)
+                    except Exception:
+                        return func(*args, **kwargs)
+                    bound.apply_defaults()
+                    if seed_arg not in bound.arguments or count_arg not in bound.arguments:
+                        return func(*args, **kwargs)
+
+                    local_seed_ns = dict(bound.arguments)
+                    try:
+                        state = float(eval(seed_src, func.__globals__, local_seed_ns))
+                        count = int(bound.arguments[count_arg])
+                    except Exception:
+                        return func(*args, **kwargs)
+
+                    if count <= 0:
+                        return state
+
+                    for i in range(count):
+                        iter_val = float(i)
+                        try:
+                            state = float(call_jit(_iris_step, (state, iter_val), None))
+                        except RuntimeError as e:
+                            msg = str(e)
+                            if (
+                                "no JIT entry" in msg
+                                or "failed to compile" in msg
+                                or "jit panic" in msg
+                            ):
+                                local_ns = {step_args[0]: state, iter_var: i, step_args[1]: iter_val}
+                                state = float(eval(step_src, func.__globals__, local_ns))
+                            else:
+                                raise
+                    return state
+
+                return while_jit_wrapper
+
+            if scalar_for_plan is not None and register_offload is not None and sig is not None:
+                step_src = scalar_for_plan["step_src"]
+                step_args = scalar_for_plan["step_args"]
+                seed_arg = scalar_for_plan["seed_arg"]
+                count_arg = scalar_for_plan["count_arg"]
+                iter_var = scalar_for_plan["iter_var"]
+                seed_src = scalar_for_plan["seed_src"]
+
+                def _iris_step(x: float, i: float) -> float:
+                    namespace = {step_args[0]: x, step_args[1]: i}
+                    return float(eval(step_src, func.__globals__, namespace))
+
+                try:
+                    register_offload(_iris_step, "jit", "float", step_src, step_args)
+                except Exception:
+                    return func
+
+                @functools.wraps(func)
+                def for_jit_wrapper(*args: Any, **kwargs: Any) -> Any:
+                    if any(_is_vector_like(a) for a in args):
+                        return _vectorized_python_fallback(func, args, kwargs)
+
+                    try:
+                        bound = sig.bind_partial(*args, **kwargs)
+                    except Exception:
+                        return func(*args, **kwargs)
+                    bound.apply_defaults()
+                    if seed_arg not in bound.arguments or count_arg not in bound.arguments:
+                        return func(*args, **kwargs)
+
+                    local_seed_ns = dict(bound.arguments)
+                    try:
+                        state = float(eval(seed_src, func.__globals__, local_seed_ns))
+                        count = int(bound.arguments[count_arg])
+                    except Exception:
+                        return func(*args, **kwargs)
+
+                    if count <= 0:
+                        return state
+
+                    for i in range(count):
+                        iter_val = float(i)
+                        try:
+                            state = float(call_jit(_iris_step, (state, iter_val), None))
+                        except RuntimeError as e:
+                            msg = str(e)
+                            if (
+                                "no JIT entry" in msg
+                                or "failed to compile" in msg
+                                or "jit panic" in msg
+                            ):
+                                local_ns = {step_args[0]: state, iter_var: i, step_args[1]: iter_val}
+                                state = float(eval(step_src, func.__globals__, local_ns))
+                            else:
+                                raise
+                    return state
+
+                return for_jit_wrapper
 
             return func
 

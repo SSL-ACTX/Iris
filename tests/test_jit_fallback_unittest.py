@@ -222,6 +222,212 @@ class TestJitFallback(unittest.TestCase):
             jit_mod.call_jit = original_call_jit
             jit_mod.register_offload = original_register_offload
 
+    def test_inlined_elif_chain_use_scalar_jit_path(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+
+        calls = {"jit": 0}
+
+        try:
+            def fake_call_jit(_func, _args, _kwargs):
+                calls["jit"] += 1
+                return 11.0
+
+            jit_mod.call_jit = fake_call_jit
+            jit_mod.register_offload = lambda *a, **k: None
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def branchy_elif(x, y):
+                z = x - y
+                if z > 3:
+                    out = z * 2
+                elif z > 0:
+                    out = z + 4
+                else:
+                    out = y - x
+                return out + 1
+
+            out = branchy_elif(5.0, 2.0)
+            self.assertEqual(out, 11.0)
+            self.assertEqual(calls["jit"], 1)
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+
+    def test_inlined_if_without_else_use_scalar_jit_path(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+
+        calls = {"jit": 0}
+
+        try:
+            def fake_call_jit(_func, _args, _kwargs):
+                calls["jit"] += 1
+                return 9.0
+
+            jit_mod.call_jit = fake_call_jit
+            jit_mod.register_offload = lambda *a, **k: None
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def branchy_if_only(x, y):
+                out = x
+                if x > y:
+                    out = out + 2
+                return out + 1
+
+            out = branchy_if_only(4.0, 3.0)
+            self.assertEqual(out, 9.0)
+            self.assertEqual(calls["jit"], 1)
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+
+    def test_inlined_pow_builtin_normalized(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+
+        seen = {"src": None}
+
+        try:
+            jit_mod.call_jit = lambda _func, _args, _kwargs: 5.0
+
+            def fake_register_offload(_func, _strategy, _return_type, src, _arg_names):
+                seen["src"] = src
+                return None
+
+            jit_mod.register_offload = fake_register_offload
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def uses_pow(x, y):
+                z = pow(x, y)
+                return z + 1
+
+            _ = uses_pow(2.0, 3.0)
+            self.assertIsNotNone(seen["src"])
+            self.assertIn("**", str(seen["src"]))
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+
+    def test_inlined_annassign_use_scalar_jit_path(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+
+        calls = {"jit": 0}
+
+        try:
+            def fake_call_jit(_func, _args, _kwargs):
+                calls["jit"] += 1
+                return 21.0
+
+            jit_mod.call_jit = fake_call_jit
+            jit_mod.register_offload = lambda *a, **k: None
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def ann_calc(x: float, y: float):
+                z: float = x + y
+                return z * 2
+
+            out = ann_calc(2.0, 3.0)
+            self.assertEqual(out, 21.0)
+            self.assertEqual(calls["jit"], 1)
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+
+    def test_scalar_while_uses_step_jit(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+
+        calls = {"jit": 0, "register": 0}
+
+        try:
+            def fake_call_jit(_func, _args, _kwargs):
+                calls["jit"] += 1
+                return _func(*_args)
+
+            def fake_register_offload(*_args, **_kwargs):
+                calls["register"] += 1
+                return None
+
+            jit_mod.call_jit = fake_call_jit
+            jit_mod.register_offload = fake_register_offload
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def scalar_loop(seed, n):
+                x = seed
+                i = 0
+                while i < n:
+                    x = x + i + 1
+                    i += 1
+                return x
+
+            out = scalar_loop(0.0, 3)
+            self.assertEqual(out, 6.0)
+            self.assertGreaterEqual(calls["register"], 1)
+            self.assertEqual(calls["jit"], 3)
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+
+    def test_scalar_for_uses_step_jit(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+
+        calls = {"jit": 0, "register": 0}
+
+        try:
+            def fake_call_jit(_func, _args, _kwargs):
+                calls["jit"] += 1
+                return _func(*_args)
+
+            def fake_register_offload(*_args, **_kwargs):
+                calls["register"] += 1
+                return None
+
+            jit_mod.call_jit = fake_call_jit
+            jit_mod.register_offload = fake_register_offload
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def scalar_for(seed, n):
+                x = seed
+                for i in range(n):
+                    x = x + i + 1
+                return x
+
+            out = scalar_for(0.0, 3)
+            self.assertEqual(out, 6.0)
+            self.assertGreaterEqual(calls["register"], 1)
+            self.assertEqual(calls["jit"], 3)
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+
+    def test_scalar_for_vector_inputs_fallback(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+
+        try:
+            jit_mod.call_jit = lambda _func, _args, _kwargs: (_ for _ in ()).throw(
+                AssertionError("scalar-for wrapper should use vectorized python fallback for vector inputs")
+            )
+            jit_mod.register_offload = lambda *a, **k: None
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def scalar_for(seed, n):
+                x = seed
+                for i in range(n):
+                    x = x + i + 1
+                return x
+
+            out = scalar_for(array.array("d", [0.0, 1.0]), 3)
+            self.assertEqual(len(out), 2)
+            self.assertAlmostEqual(float(out[0]), 6.0)
+            self.assertAlmostEqual(float(out[1]), 7.0)
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+
 
 if __name__ == "__main__":
     unittest.main()
