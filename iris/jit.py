@@ -322,6 +322,14 @@ def _extract_return_expr_plan(
     return None
 
 
+def _contains_unsupported_ast(node: ast.AST) -> bool:
+    """Check if node contains constructs unsupported by JIT parser."""
+    for child in ast.walk(node):
+        if isinstance(child, (ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)):
+            return True
+    return False
+
+
 def _extract_inlined_expr_plan(
     fn_node: ast.FunctionDef,
     fn_globals: Optional[dict[str, Any]] = None,
@@ -330,6 +338,9 @@ def _extract_inlined_expr_plan(
     stmts = _strip_docstring(list(fn_node.body))
     ret_expr = _lower_to_expr(stmts, ast.Constant(value=0.0), fn_globals, inline_cache)
     if ret_expr is None:
+        return None
+    # Reject if lowered expression contains constructs JIT parser doesn't support
+    if _contains_unsupported_ast(ret_expr):
         return None
     return ast.unparse(ret_expr)
 
