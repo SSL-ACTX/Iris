@@ -19,6 +19,21 @@ use pyo3::IntoPy;
 const BREAK_SENTINEL_BITS: u64 = 0x7ff8_0000_0000_0b01;
 const CONTINUE_SENTINEL_BITS: u64 = 0x7ff8_0000_0000_0c01;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SymbolAlias {
+    Identity,
+    Rename(&'static str),
+}
+
+pub(crate) fn resolve_symbol_alias(symbol: &str, arg_count: usize) -> Option<SymbolAlias> {
+    match (symbol, arg_count) {
+        ("float", 1) => Some(SymbolAlias::Identity),
+        ("int", 1) => Some(SymbolAlias::Rename("trunc")),
+        ("round", 1) => Some(SymbolAlias::Rename("round")),
+        _ => None,
+    }
+}
+
 /// A compiled function entry returned by the JIT.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReductionMode {
@@ -908,21 +923,29 @@ fn gen_expr(
                 return fb.ins().select(cond_true, then_val, else_val);
             }
 
-            if symbol == "float" && args.len() == 1 {
-                return gen_expr(&args[0], fb, ptr, arg_names, module, locals);
-            }
-
-            if symbol == "int" && args.len() == 1 {
-                let v = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
-                let mut sig = module.make_signature();
-                sig.params.push(AbiParam::new(types::F64));
-                sig.returns.push(AbiParam::new(types::F64));
-                let fid = module
-                    .declare_function("trunc", Linkage::Import, &sig)
-                    .expect("failed to declare trunc");
-                let local = module.declare_func_in_func(fid, &mut fb.func);
-                let call = fb.ins().call(local, &[v]);
-                return fb.inst_results(call)[0];
+            if let Some(alias) = resolve_symbol_alias(&symbol, args.len()) {
+                match alias {
+                    SymbolAlias::Identity => {
+                        return gen_expr(&args[0], fb, ptr, arg_names, module, locals);
+                    }
+                    SymbolAlias::Rename(target) => {
+                        let mut arg_vals = Vec::with_capacity(args.len());
+                        for a in args {
+                            arg_vals.push(gen_expr(a, fb, ptr, arg_names, module, locals));
+                        }
+                        let mut sig = module.make_signature();
+                        for _ in 0..arg_vals.len() {
+                            sig.params.push(AbiParam::new(types::F64));
+                        }
+                        sig.returns.push(AbiParam::new(types::F64));
+                        let func_id = module
+                            .declare_function(target, Linkage::Import, &sig)
+                            .expect("failed to declare external function");
+                        let local = module.declare_func_in_func(func_id, &mut fb.func);
+                        let call = fb.ins().call(local, &arg_vals);
+                        return fb.inst_results(call)[0];
+                    }
+                }
             }
 
             if symbol == "min" && args.len() == 2 {

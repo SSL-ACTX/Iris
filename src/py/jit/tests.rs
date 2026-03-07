@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::py::jit::codegen::execute_jit_func;
+use crate::py::jit::codegen::{resolve_symbol_alias, SymbolAlias};
 
 #[test]
 fn compile_jit_basic_math() {
@@ -110,6 +111,28 @@ fn compile_jit_math_functions() {
     let u: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry7.func_ptr) };
     let vals7 = [2.9];
     assert!((u(vals7.as_ptr()) - 3.0).abs() < 1e-12);
+
+    let entry8 = compile_jit("round(x)", &args).expect("should compile round alias");
+    let v: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry8.func_ptr) };
+    let vals8 = [2.6];
+    assert!((v(vals8.as_ptr()) - 3.0).abs() < 1e-12);
+}
+
+#[test]
+fn symbol_alias_table_maps_expected_intrinsics() {
+    assert_eq!(
+        resolve_symbol_alias("int", 1),
+        Some(SymbolAlias::Rename("trunc"))
+    );
+    assert_eq!(
+        resolve_symbol_alias("float", 1),
+        Some(SymbolAlias::Identity)
+    );
+    assert_eq!(
+        resolve_symbol_alias("round", 1),
+        Some(SymbolAlias::Rename("round"))
+    );
+    assert_eq!(resolve_symbol_alias("round", 2), None);
 }
 
 #[test]
