@@ -233,7 +233,13 @@ class Runtime:
         self._inner.path_supervise_with_factory(path, pid, factory, strategy)
 
     def resolve_remote(self, addr: str, name: str) -> Optional[int]:
-        """Query a remote node for a PID by name (Blocking)."""
+        """Query a remote node for a PID by name (Blocking).
+
+        The returned value is not the raw PID from the remote node – it is a
+        *local proxy* that behaves like an ordinary actor.  Sending messages
+        to this proxy will transparently forward them across the network,
+        allowing callers to treat remote services exactly like local ones.
+        """
         return self._inner.resolve_remote(addr, name)
 
     def resolve_remote_py(self, addr: str, name: str) -> Awaitable[Optional[int]]:
@@ -310,11 +316,22 @@ class Runtime:
         self._inner.set_release_gil_strict(strict)
 
     def send_remote(self, addr: str, pid: int, data: bytes):
-        """Send data to a PID on a remote node."""
+        """Send data to a PID on a remote node.
+
+        This helper will internally create or reuse a proxy actor, so users
+        rarely need to call it directly.  Most code should just use
+        :meth:`send` on a PID returned by :meth:`resolve_remote`.
+        """
         self._inner.send_remote(addr, pid, data)
 
     def monitor_remote(self, addr: str, pid: int):
-        """Watch a remote PID; triggers local supervisor on failure."""
+        """Watch a remote PID; triggers local supervisor on failure.
+
+        If you pass a raw remote PID the runtime will first create a local
+        proxy and then monitor that proxy.  After this call succeeds you can
+        safely treat the returned PID (if you captured it) like any other
+        actor in your system.
+        """
         self._inner.monitor_remote(addr, pid)
 
     def stop(self, pid: int):

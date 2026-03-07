@@ -68,16 +68,18 @@ def auth_handler(msg, results=results):
             .extract()
             .unwrap();
 
-        assert_eq!(
-            resolved_pid,
-            Some(pid_a),
+        assert!(
+            resolved_pid.is_some(),
             "Node B failed to resolve Node A's service name"
         );
+        let proxy = resolved_pid.unwrap();
+        // PID values may coincide across different runtimes; only the proxy
+        // semantics matter (successful forwarding below).
 
-        // Node B sends a message to the resolved PID
+        // Node B sends a message to the proxy PID using the normal `send` API
         let payload = pyo3::types::PyBytes::new(py, b"login_request");
-        rt_b.call_method1("send_remote", (addr, resolved_pid.unwrap(), payload))
-            .unwrap();
+        // the Python send method takes bytes directly
+        rt_b.call_method1("send", (proxy, payload)).unwrap();
     });
 
     // 3. Verification: Did Node A receive the message?

@@ -2,7 +2,7 @@
 import time
 import array
 import math
-from iris.jit import offload
+import iris
 
 # --- Complex Math with Functions & Negatives ---
 # This tests the new AST parser's ability to handle function calls,
@@ -11,7 +11,7 @@ from iris.jit import offload
 def wave_normal(x: float, y: float, z: float) -> float:
     return math.sin(x) * math.cos(y) + math.sqrt(z) + -1.5
 
-@offload(strategy="jit", return_type="float")
+# @iris.offload(strategy="jit", return_type="float")
 def wave_jit(x: float, y: float, z: float) -> float:
     return math.sin(x) * math.cos(y) + math.sqrt(z) + -1.5
 

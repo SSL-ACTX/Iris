@@ -29,10 +29,14 @@ async fn test_remote_monitoring_failure() {
             .extract()
             .unwrap();
 
+        // register under a well-known name so the other node can look it up
+        rt.call_method1("register", ("target", pid)).unwrap();
+
         (rt.into_py(py), pid)
     });
 
     // 2. Setup Node B (The Guardian)
+    let mut proxy_pid: u64 = 0;
     let rt_b = Python::with_gil(|py| {
         let module = iris::py::make_module(py).unwrap();
         let rt = module
@@ -42,8 +46,18 @@ async fn test_remote_monitoring_failure() {
             .call0()
             .unwrap();
 
-        // Tell Node B to monitor the actor on Node A
-        rt.call_method1("monitor_remote", (addr, pid_a)).unwrap();
+        // Node B first resolves the PID; this returns a local proxy.
+        let resolved: Option<u64> = rt
+            .call_method1("resolve_remote", (addr, "target"))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(resolved.is_some());
+        proxy_pid = resolved.unwrap();
+
+        // Tell Node B to monitor the proxy; this will in turn watch the
+        // real remote actor and shut down the proxy if the node disappears.
+        rt.call_method1("monitor_remote", (addr, proxy_pid)).unwrap();
         rt.into_py(py)
     });
 
@@ -55,16 +69,13 @@ async fn test_remote_monitoring_failure() {
     // Give time for the network task in Node B to realize the connection is gone/refused
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // 4. Verification: Node B's supervisor should now show an exit notification
+    // 4. Verification: proxy pid should no longer be alive
     Python::with_gil(|py| {
-        // In a real scenario, we'd check if a restart was triggered.
-        // Here we just check if Node B's internal supervisor state was updated.
-        let _count: usize = rt_b
-            .call_method0(py, "children_count")
+        let alive: bool = rt_b
+            .call_method1(py, "is_alive", (proxy_pid,))
             .unwrap()
             .extract(py)
             .unwrap();
-        // The count value isn't meaningful to validate in this simplified test;
-        // we just ensure the call succeeds and the return value is a usize.
+        assert!(!alive, "proxy should have been shut down after remote failure");
     });
 }

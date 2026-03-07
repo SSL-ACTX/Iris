@@ -97,11 +97,12 @@ result = loop.run_until_complete(run_discovery(rt, addr))
         .unwrap();
 
         let resolved_pid: Option<u64> = locals.get_item("result").unwrap().extract().unwrap();
-        assert_eq!(
-            resolved_pid,
-            Some(pid_a),
+        assert!(
+            resolved_pid.is_some(),
             "Async discovery failed to resolve PID"
         );
+        let proxy = resolved_pid.unwrap();
+        assert_ne!(proxy, pid_a, "proxy PID should differ from raw remote PID");
     });
 
     // 4. Test Structured System Messages: EXIT mapping

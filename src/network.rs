@@ -482,4 +482,39 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert!(!rt.is_alive(pid));
     }
+
+    #[tokio::test]
+    async fn resolve_and_send_via_proxy() {
+        // provider runtime holds the actual actor
+        let (rt_a, addr) = setup_runtime_and_server().await;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        let svc = rt_a.spawn_handler_with_budget(
+            move |msg| {
+                let c = c.clone();
+                async move {
+                    if let Message::User(_b) = msg {
+                        c.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            },
+            10,
+        );
+        rt_a.register("svc".to_string(), svc);
+
+        // client runtime resolves and then uses send() normally
+        let rt_b = Arc::new(Runtime::new());
+        let proxy = rt_b
+            .resolve_remote_async(addr.to_string(), "svc".to_string())
+            .await
+            .expect("resolved should return pid");
+        // numeric PID equality across separate runtimes is unimportant; the
+        // real validation is that messages traverse the network below.
+
+        rt_b
+            .send(proxy, Message::User(Bytes::from_static(b"yo")))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
 }

@@ -125,6 +125,30 @@ async function test_registry() {
         await test_push_actor();
         await test_mailbox_actor();
         await test_registry();
+        // remote proxy/location transparency check
+        async function test_remote_proxy() {
+            console.log("[4/4] Testing Remote Proxy Transparency...");
+            const rt_a = new NodeRuntime();
+            const addr = "127.0.0.1:9097";
+            rt_a.listen(addr);
+            let received = null;
+            const pid_a = rt_a.spawn((msg) => {
+                if (msg.data) {
+                    received = msg.data.toString();
+                }
+            });
+            rt_a.register("svc", pid_a);
+            await sleep(100);
+            const rt_b = new NodeRuntime();
+            const proxy = await rt_b.resolveRemote(addr, "svc");
+            assert.ok(proxy !== undefined, "should resolve a PID");
+            assert.notStrictEqual(proxy, pid_a, "proxy should differ from remote pid");
+            rt_b.send(proxy, Buffer.from("from_b"));
+            await sleep(100);
+            assert.strictEqual(received, "from_b");
+            console.log("✅ Remote Proxy Passed");
+        }
+        await test_remote_proxy();
         console.log("\n🎉 All Tests Passed!");
     } catch (e) {
         console.error("\n❌ Test Failed:", e);

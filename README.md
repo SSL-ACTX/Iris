@@ -54,7 +54,9 @@ Update live application logic without stopping the runtime.
 Actors are first-class network services.
 * **Name registry:** register human-readable names (for example, `"auth-provider"`) with `register`/`unregister` and resolve with `whereis`.
 * **Async discovery:** resolve remote service PIDs with Python `await` or Node.js Promises without blocking runtime progress.
-* **Location transparency:** message actors the same way whether local or remote.
+* **Location transparency:** message actors the same way whether local or remote.  The
+  runtime automatically spawns lightweight proxy actors; callers simply treat
+  the returned PID as if it were local and the network is handled invisibly.
 
 ### 🛡️ Distributed Supervision & Self-Healing
 Built-in fault tolerance follows the “Let it Crash” model.
@@ -392,10 +394,11 @@ target = rt.whereis("auth_worker")
 # 3. Look it up remotely (Network)
 async def find_remote():
     addr = "192.168.1.5:9000"
-    # Non-blocking resolution
-    remote_pid = await rt.resolve_remote_py(addr, "auth_worker")
-    if remote_pid:
-        rt.send_remote(addr, remote_pid, b"login")
+    # Non-blocking resolution returns a local *proxy* actor
+    proxy_pid = await rt.resolve_remote_py(addr, "auth_worker")
+    if proxy_pid:
+        # send just like a local PID — the runtime forwards the message
+        rt.send(proxy_pid, b"login")
 
 ```
 
@@ -409,9 +412,11 @@ rt.register("auth_worker", pid);
 // 2. Resolve Remote
 async function findAndQuery() {
     const addr = "192.168.1.5:9000";
-    const targetPid = await rt.resolveRemote(addr, "auth_worker");
-    if (targetPid) {
-        rt.sendRemote(addr, targetPid, Buffer.from("login"));
+    // resolution returns a local proxy PID
+    const proxyPid = await rt.resolveRemote(addr, "auth_worker");
+    if (proxyPid) {
+        // treat it exactly like a local actor
+        rt.send(proxyPid, Buffer.from("login"));
     }
 }
 

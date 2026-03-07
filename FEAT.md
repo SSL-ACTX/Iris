@@ -51,12 +51,12 @@
 
 ## 🟠 Scale & Abstraction (Orleans-Inspired)
 
-* [ ] **Virtual / Lazy Actors**
-  Actors instantiated on first message, destroyed when idle.  **Work in progress: robust design sketched, core APIs defined.**
+* [x] **Virtual / Lazy Actors**
+  Actors instantiated on first message, destroyed when idle.
 
-* [ ] **Location Transparency**
-  Local vs remote actors are indistinguishable to callers.
-
+* [x] **Location Transparency**
+  Local vs remote actors are indistinguishable to callers.  Automatic
+  proxies forward messages and monitoring across nodes.
 ---
 
 ## 🔴 Distribution & Resilience
@@ -123,6 +123,6 @@
 
 ## 🏁 Guiding Principle (Pin This)
 
-* [ ] **Runtime First, Language Second**
+* [-] **Runtime First, Language Second**
   Languages are guests.
   Rust owns scheduling, memory, safety, and correctness.

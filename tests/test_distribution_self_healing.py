@@ -49,18 +49,12 @@ def run_self_healing_monitor():
             try:
                 target_pid = rt.resolve_remote(ADDR, SERVICE_NAME)
                 if target_pid:
-                    # Proxy that forwards to the remote PID
-                    def proxy_handler(msg):
-                        rt.send_remote(ADDR, target_pid, msg)
-
-                    # We use an observed handler locally to inspect system messages
-                    local_pid = rt._inner.spawn_observed_handler(10)
-
-                    # Attach the proxy logic via hot_swap or just use a simple handler
-                    # For this test, we'll just track the local_pid
+                    # the PID returned is a local proxy that automatically forwards
+                    # to the remote service.  we can monitor it directly and use it
+                    # as our child.
                     rt.monitor_remote(ADDR, target_pid)
                     print(f"🛡️  Supervisor: Link restored to PID {target_pid}")
-                    return local_pid
+                    return target_pid
             except Exception:
                 pass
             time.sleep(0.5)

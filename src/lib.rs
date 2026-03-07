@@ -63,6 +63,11 @@ pub struct Runtime {
     monitor_backoff_max: Arc<Mutex<Duration>>,
     monitor_failure_threshold: Arc<Mutex<usize>>,
     registry: Arc<registry::NameRegistry>,
+    /// Mapping for locally‑spawned proxies that forward to remote actors.
+    /// Key is the local proxy PID; value is (remote address, remote PID).
+    remote_proxies: Arc<DashMap<Pid, (String, Pid)>>,
+    /// Reverse lookup from (address, remote_pid) -> local proxy PID.
+    proxy_by_remote: Arc<DashMap<(String, Pid), Pid>>,
     /// Optional per-path supervisors (shallow supervisors keyed by path).
     path_supervisors: Arc<DashMap<String, Arc<supervisor::Supervisor>>>,
     /// Maps a child PID to its parent PID for structured concurrency.
@@ -119,6 +124,8 @@ impl Runtime {
             monitor_backoff_factor: Arc::new(Mutex::new(2.0)),
             monitor_backoff_max: Arc::new(Mutex::new(Duration::from_secs(60))),
             monitor_failure_threshold: Arc::new(Mutex::new(1)),
+            remote_proxies: Arc::new(DashMap::new()),
+            proxy_by_remote: Arc::new(DashMap::new()),
         };
 
         let net_manager = network::NetworkManager::new(Arc::new(rt.clone()));
@@ -378,13 +385,80 @@ impl Runtime {
         });
     }
 
+    /// Helper used internally when the runtime first learns about a remote
+    /// actor.  We spawn a tiny local "proxy" actor whose job is to forward
+    /// all user messages over the network to the real PID residing on the
+    /// remote node.  Proxies behave exactly like ordinary actors from the
+    /// caller's perspective (supervision, backpressure, `is_alive`, etc).
+    fn lookup_or_create_proxy(&self, addr: &str, remote_pid: Pid) -> Pid {
+        // if the caller accidentally passes a proxy PID that's already been
+        // created for this address, just reuse it rather than nesting
+        // proxies.
+        if let Some(entry) = self.remote_proxies.get(&remote_pid) {
+            let existing_addr = &entry.value().0;
+            if existing_addr == addr {
+                return remote_pid;
+            }
+        }
+
+        // next, check the reverse index so we can return an existing proxy
+        // without spawning a new actor.
+        if let Some(entry) = self
+            .proxy_by_remote
+            .get(&(addr.to_string(), remote_pid))
+        {
+            return *entry.value();
+        }
+
+        let addr_string = addr.to_string();
+        let remote_copy = remote_pid;
+        let rt_clone = self.clone();
+        // clone early so the closure borrow doesn't consume it permanently
+        let addr_string_clone = addr_string.clone();
+
+        // spawn a handler that simply relays user messages
+        let proxy_pid = self.spawn_actor(move |mut rx| {
+            let rt_inner = rt_clone.clone();
+            let addr_inner = addr_string_clone.clone();
+            async move {
+                while let Some(msg) = rx.recv().await {
+                    if let mailbox::Message::User(bytes) = msg {
+                        // bypass the public `send_remote` path to avoid
+                        // creating a second proxy for the same target.  send
+                        // directly through the network manager.
+                        let manager = network::NetworkManager::new(Arc::new(rt_inner.clone()));
+                        let _ = manager.send_remote(&addr_inner, remote_copy, bytes.clone()).await;
+                    }
+                }
+            }
+        });
+
+        // record mapping in both directions
+        self.remote_proxies
+            .insert(proxy_pid, (addr_string.clone(), remote_pid));
+        self.proxy_by_remote
+            .insert((addr_string.clone(), remote_pid), proxy_pid);
+
+        // automatically monitor the remote node; if it dies the proxy will
+        // be stopped which in turn notifies any watchers of the exit.
+        self.monitor_remote(addr_string.clone(), proxy_pid);
+
+        proxy_pid
+    }
+
     /// Resolve a name on a remote node.
-    /// This is an async call that queries the remote node's registry.
+    /// This is an async call that queries the remote node's registry.  The
+    /// `Pid` returned is not the raw remote pid – it is a local proxy that
+    /// forwards messages to the remote actor, allowing the caller to treat the
+    /// result exactly like a normal local PID.
     pub async fn resolve_remote_async(&self, addr: String, name: String) -> Option<Pid> {
         let manager = network::NetworkManager::new(Arc::new(self.clone()));
         match manager.resolve_remote(&addr, &name).await {
             Ok(0) => None, // Node returned 0, meaning not found
-            Ok(pid) => Some(pid),
+            Ok(pid) => {
+                let proxy = self.lookup_or_create_proxy(&addr, pid);
+                Some(proxy)
+            }
             Err(e) => {
                 eprintln!("[Iris] Remote Resolve Error: {}", e);
                 None
@@ -394,23 +468,36 @@ impl Runtime {
 
     /// Send a binary payload to a PID on a specific remote node.
     pub fn send_remote(&self, addr: String, pid: Pid, data: bytes::Bytes) {
-        let rt_handle = Arc::new(self.clone());
-        RUNTIME.spawn(async move {
-            let manager = network::NetworkManager::new(rt_handle);
-            if let Err(e) = manager.send_remote(&addr, pid, data).await {
-                eprintln!("[Iris] Remote Send Error: {}", e);
-            }
-        });
+        // convert to a proxy so that callers don't need to manage raw remote
+        // PIDs themselves.  This will spawn a proxy actor the first time we
+        // talk to a particular remote target.
+        let local = self.lookup_or_create_proxy(&addr, pid);
+        // route using the normal send path so that overflow policies and
+        // virtual activation work identically.
+        let _ = self.send_user(local, data);
     }
 
     /// Remote Monitoring with Heartbeat support.
     /// Periodically probes the remote node (default 1s interval) to detect failures.
     pub fn monitor_remote(&self, addr: String, pid: Pid) {
+        // if this pid is already a proxy for the same address we can use it
+        // directly, otherwise create/look up a proxy for the raw remote PID.
+        let local = if let Some(entry) = self.remote_proxies.get(&pid) {
+            let existing_addr = &entry.value().0;
+            if existing_addr == &addr {
+                pid
+            } else {
+                self.lookup_or_create_proxy(&addr, pid)
+            }
+        } else {
+            self.lookup_or_create_proxy(&addr, pid)
+        };
+
         let rt_handle = Arc::new(self.clone());
         RUNTIME.spawn(async move {
             let manager = network::NetworkManager::new(rt_handle.clone());
             // Probes node health at a 1000ms interval for silent failure detection
-            manager.monitor_remote(addr, pid, 1000).await;
+            manager.monitor_remote(addr, local, 1000).await;
         });
     }
 
@@ -418,6 +505,12 @@ impl Runtime {
 
     /// Stop an actor by closing its mailbox.
     pub fn stop(&self, pid: Pid) {
+        // if this pid is a proxy, clear both maps so lookups don't return
+        // stale entries.  DashMap::remove returns the key and value pair.
+        if let Some((_key, (addr, rpid))) = self.remote_proxies.remove(&pid) {
+            self.proxy_by_remote.remove(&(addr.clone(), rpid));
+        }
+
         self.mailboxes.remove(&pid);
         if self.virtual_specs.remove(&pid).is_some() {
             self.virtual_activate_locks.remove(&pid);
@@ -1158,6 +1251,12 @@ impl Runtime {
     }
 
     pub fn is_alive(&self, pid: Pid) -> bool {
+        // proxies are normal actors so the slab check would cover them, but
+        // we also treat any registered proxy as alive even if its mailbox has
+        // been removed but the slab entry hasn't been cleaned up yet.
+        if self.remote_proxies.contains_key(&pid) {
+            return true;
+        }
         let slab = self.slab.lock().unwrap();
         slab.is_valid(pid)
     }
@@ -1242,6 +1341,10 @@ impl Runtime {
     /// each spawn_* helper after the actor has torn down its mailbox and been
     /// deallocated.
     fn handle_exit_internal(&self, pid: Pid) {
+        // DashMap::remove returns (key, value); clean up if this was a proxy
+        if let Some((_key, (addr, rpid))) = self.remote_proxies.remove(&pid) {
+            self.proxy_by_remote.remove(&(addr.clone(), rpid));
+        }
         // remove the pid from its parent's child list (if any)
         if let Some((_, parent)) = self.parent_of.remove(&pid) {
             if let Some(mut entry) = self.children_by_parent.get_mut(&parent) {
