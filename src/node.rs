@@ -27,6 +27,13 @@ fn message_to_js(env: &Env, msg: Message) -> Result<JsUnknown> {
             let buf = env.create_buffer_with_data(bytes.to_vec())?.into_unknown();
             Ok(buf)
         }
+        Message::Request { reply_to, payload } => {
+            let mut obj = env.create_object()?;
+            let buf = env.create_buffer_with_data(payload.to_vec())?.into_unknown();
+            obj.set_named_property("replyTo", reply_to as i64)?;
+            obj.set_named_property("payload", buf)?;
+            Ok(obj.into_unknown())
+        }
         Message::System(sys) => {
             let (type_name, target_pid, reason, metadata) = match sys {
                 SystemMessage::Exit(info) => (
@@ -38,6 +45,8 @@ fn message_to_js(env: &Env, msg: Message) -> Result<JsUnknown> {
                         crate::mailbox::ExitReason::Timeout => Some("timeout".to_string()),
                         crate::mailbox::ExitReason::Killed => Some("killed".to_string()),
                         crate::mailbox::ExitReason::Oom => Some("oom".to_string()),
+                        crate::mailbox::ExitReason::Disconnected => Some("disconnected".to_string()),
+                        crate::mailbox::ExitReason::RemotePanic => Some("remote_panic".to_string()),
                         crate::mailbox::ExitReason::Other(ref s) => Some(s.clone()),
                     },
                     info.metadata.clone(),
@@ -108,6 +117,13 @@ impl JsMailbox {
 pub struct WrappedMessage {
     pub data: Option<Buffer>,
     pub system: Option<JsSystemMessage>,
+    pub request: Option<JsRequest>,
+}
+
+#[napi(object)]
+pub struct JsRequest {
+    pub reply_to: i64,
+    pub payload: Buffer,
 }
 
 impl From<Message> for WrappedMessage {
@@ -116,6 +132,15 @@ impl From<Message> for WrappedMessage {
             Message::User(b) => WrappedMessage {
                 data: Some(b.to_vec().into()),
                 system: None,
+                request: None,
+            },
+            Message::Request { reply_to, payload } => WrappedMessage {
+                data: None,
+                system: None,
+                request: Some(JsRequest {
+                    reply_to: reply_to as i64,
+                    payload: payload.to_vec().into(),
+                }),
             },
             Message::System(sys) => {
                 let (type_name, target_pid, reason, metadata) = match sys {
@@ -128,6 +153,8 @@ impl From<Message> for WrappedMessage {
                             crate::mailbox::ExitReason::Timeout => Some("timeout".to_string()),
                             crate::mailbox::ExitReason::Killed => Some("killed".to_string()),
                             crate::mailbox::ExitReason::Oom => Some("oom".to_string()),
+                            crate::mailbox::ExitReason::Disconnected => Some("disconnected".to_string()),
+                            crate::mailbox::ExitReason::RemotePanic => Some("remote_panic".to_string()),
                             crate::mailbox::ExitReason::Other(ref s) => Some(s.clone()),
                         },
                         info.metadata.clone(),
@@ -151,6 +178,7 @@ impl From<Message> for WrappedMessage {
                         reason,
                         metadata,
                     }),
+                    request: None,
                 }
             }
         }
@@ -384,6 +412,61 @@ impl NodeRuntime {
     }
 
     #[napi]
+    pub fn list_actors(&self) -> Vec<i64> {
+        self.inner
+            .list_actors()
+            .into_iter()
+            .map(|p| p as i64)
+            .collect()
+    }
+
+    #[napi]
+    pub fn actor_info(&self, pid: i64) -> Option<std::collections::HashMap<String, String>> {
+        self.inner.actor_info(pid as u64)
+    }
+
+    #[napi]
+    pub fn set_actor_health(&self, pid: i64, status: String) -> Result<()> {
+        let s = match status.to_lowercase().as_str() {
+            "starting" => crate::core::telemetry::HealthStatus::Starting,
+            "ready" => crate::core::telemetry::HealthStatus::Ready,
+            "busy" => crate::core::telemetry::HealthStatus::Busy,
+            "degraded" => crate::core::telemetry::HealthStatus::Degraded,
+            _ => {
+                return Err(Error::new(Status::InvalidArg, "Invalid health status".to_owned()))
+            }
+        };
+        self.inner.set_actor_health(pid as u64, s);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn get_metrics(&self) -> std::collections::HashMap<String, i64> {
+        let tel = self.inner.telemetry();
+        let mut m = std::collections::HashMap::new();
+        m.insert("actorCount".to_string(), tel.get_actor_count() as i64);
+        m.insert("messagesSent".to_string(), tel.get_messages_sent() as i64);
+        m.insert(
+            "messagesReceived".to_string(),
+            tel.get_messages_received() as i64,
+        );
+        m
+    }
+
+    #[napi]
+    pub async fn call(&self, pid: i64, data: Buffer, timeout_sec: Option<f64>) -> Result<Buffer> {
+        let rt = self.inner.clone();
+        let payload = bytes::Bytes::from(data.to_vec());
+        let to = timeout_sec.unwrap_or(5.0);
+        let duration = std::time::Duration::from_secs_f64(to);
+
+        match rt.call(pid as u64, payload, duration).await {
+            Ok(b) => Ok(b.to_vec().into()),
+            Err(e) => Err(Error::from_reason(e)),
+        }
+    }
+
+    #[napi]
     pub fn send(&self, pid: i64, data: Buffer) -> Result<bool> {
         let msg = crate::mailbox::Message::User(bytes::Bytes::from(data.to_vec()));
         Ok(self.inner.send(pid as u64, msg).is_ok())
@@ -437,6 +520,21 @@ impl NodeRuntime {
     }
 
     // --- Lifecycle & Cluster Management ---
+
+    #[napi]
+    pub fn set_system_capacity(&self, cap: u32) {
+        self.inner.set_system_capacity(cap as u64);
+    }
+
+    #[napi]
+    pub fn set_load_shedding(&self, enabled: bool) {
+        self.inner.set_load_shedding(enabled);
+    }
+
+    #[napi]
+    pub fn is_load_shedding_active(&self) -> bool {
+        self.inner.is_load_shedding_active()
+    }
 
     #[napi]
     pub fn stop(&self, pid: i64) {

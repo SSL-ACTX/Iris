@@ -120,3 +120,17 @@ async fn backpressure_hysteresis_prevents_flapping() {
     let level = tx.backpressure_level_with_hysteresis(Some(10), BackpressureLevel::Critical);
     assert_eq!(level, BackpressureLevel::High);
 }
+
+#[tokio::test]
+async fn len_counter_reflects_queue_size() {
+    let (tx, mut rx) = bounded_channel(3);
+    assert_eq!(tx.len(), 0);
+    tx.send(Message::User(Bytes::from_static(b"a"))).unwrap();
+    assert_eq!(tx.len(), 1);
+    tx.send(Message::User(Bytes::from_static(b"b"))).unwrap();
+    assert_eq!(tx.len(), 2);
+    // receive one and check counter decreases
+    let _ = rx.recv().await.expect("recv");
+    // len() should reflect the updated value
+    assert!(tx.len() <= 1);
+}

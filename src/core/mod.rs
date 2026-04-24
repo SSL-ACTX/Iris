@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime as TokioRuntime;
 use tokio::time::Duration;
@@ -13,6 +13,7 @@ pub mod network;
 pub mod pid;
 pub mod registry;
 pub mod supervisor;
+pub mod telemetry;
 
 pub mod behavior;
 pub mod send;
@@ -82,6 +83,9 @@ pub struct Runtime {
     pub(crate) virtual_activate_locks: Arc<DashMap<Pid, Arc<Mutex<()>>>>,
     /// Track last known backpressure level for each pid, to emit signals on change.
     pub(crate) backpressure_state: Arc<DashMap<Pid, mailbox::BackpressureLevel>>,
+    pub(crate) telemetry: Arc<telemetry::TelemetryManager>,
+    pub(crate) system_capacity: Arc<AtomicU64>,
+    pub(crate) load_shedding_enabled: Arc<Mutex<bool>>,
     // Runtime-configurable limits for Python GIL-release behavior
     pub(crate) release_gil_max_threads: Arc<Mutex<usize>>,
     pub(crate) gil_pool_size: Arc<Mutex<usize>>,
@@ -125,6 +129,8 @@ impl Runtime {
             pyo3::prepare_freethreaded_python();
         }
 
+        let (telemetry_mgr, _event_rx) = telemetry::TelemetryManager::new();
+
         let rt = Runtime {
             slab: Arc::new(Mutex::new(pid::SlabAllocator::new())),
             mailboxes: Arc::new(DashMap::new()),
@@ -138,6 +144,9 @@ impl Runtime {
             bounded_capacity: Arc::new(DashMap::new()),
             overflow_policy: Arc::new(DashMap::new()),
             backpressure_state: Arc::new(DashMap::new()),
+            telemetry: telemetry_mgr,
+            system_capacity: Arc::new(AtomicU64::new(100_000)), // Default 100k actors
+            load_shedding_enabled: Arc::new(Mutex::new(false)),
             virtual_specs: Arc::new(DashMap::new()),
             virtual_activate_locks: Arc::new(DashMap::new()),
             release_gil_max_threads: Arc::new(Mutex::new(0)),
@@ -210,5 +219,103 @@ impl Runtime {
     /// Returns whether strict failure mode is enabled.
     pub fn is_release_gil_strict(&self) -> bool {
         *self.release_gil_strict.lock().unwrap()
+    }
+
+    /// Access the telemetry manager for metrics and events.
+    pub fn telemetry(&self) -> Arc<telemetry::TelemetryManager> {
+        self.telemetry.clone()
+    }
+
+    /// Set system-wide actor capacity for load shedding.
+    pub fn set_system_capacity(&self, cap: u64) {
+        self.system_capacity.store(cap, Ordering::Relaxed);
+    }
+
+    /// Enable or disable global load shedding.
+    pub fn set_load_shedding(&self, enabled: bool) {
+        *self.load_shedding_enabled.lock().unwrap() = enabled;
+    }
+
+    /// Check if load shedding is currently active based on system pressure.
+    pub fn is_load_shedding_active(&self) -> bool {
+        if !*self.load_shedding_enabled.lock().unwrap() {
+            return false;
+        }
+        let cap = self.system_capacity.load(Ordering::Relaxed);
+        let count = self.telemetry.get_actor_count();
+        count >= cap
+    }
+
+    /// List all active actor PIDs in the system.
+    pub fn list_actors(&self) -> Vec<Pid> {
+        self.mailboxes.iter().map(|r| *r.key()).collect()
+    }
+
+    /// Set health status for an actor.
+    pub fn set_actor_health(&self, pid: Pid, status: telemetry::HealthStatus) {
+        self.telemetry.set_health(pid, status);
+    }
+
+    /// Get health status for an actor.
+    pub fn get_actor_health(&self, pid: Pid) -> telemetry::HealthStatus {
+        self.telemetry.get_health(pid)
+    }
+
+    /// Get detailed info about an actor.
+    pub fn actor_info(&self, pid: Pid) -> Option<HashMap<String, String>> {
+        if !self.is_alive(pid) {
+            return None;
+        }
+
+        let mut info = HashMap::new();
+        info.insert("pid".to_string(), pid.to_string());
+        info.insert(
+            "health".to_string(),
+            format!("{:?}", self.get_actor_health(pid)),
+        );
+
+        if let Some(mbox) = self.mailboxes.get(&pid) {
+            info.insert("mailbox_size".to_string(), mbox.len().to_string());
+        }
+
+        if let Some(cap) = self.bounded_capacity.get(&pid) {
+            info.insert("mailbox_capacity".to_string(), cap.to_string());
+        }
+
+        if let Some(policy) = self.overflow_policy.get(&pid) {
+            info.insert(
+                "overflow_policy".to_string(),
+                format!("{:?}", policy.value()),
+            );
+        }
+
+        if let Some(level) = self.backpressure_state.get(&pid) {
+            info.insert("backpressure".to_string(), level.as_str().to_string());
+        }
+
+        if let Some(version) = self.behavior_versions.get(&pid) {
+            info.insert("behavior_version".to_string(), version.to_string());
+        }
+
+        if let Some(parent) = self.parent_of.get(&pid) {
+            info.insert("parent".to_string(), parent.to_string());
+        }
+
+        if let Some(children) = self.children_by_parent.get(&pid) {
+            info.insert(
+                "children_count".to_string(),
+                children.value().len().to_string(),
+            );
+        }
+
+        if let Some(proxy) = self.remote_proxies.get(&pid) {
+            info.insert("is_proxy".to_string(), "true".to_string());
+            info.insert("remote_address".to_string(), proxy.0.clone());
+            info.insert("remote_pid".to_string(), proxy.1.to_string());
+        } else {
+            info.insert("is_proxy".to_string(), "false".to_string());
+        }
+
+        Some(info)
     }
 }

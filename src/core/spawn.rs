@@ -24,10 +24,19 @@ impl Runtime {
         H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
+        if self.is_load_shedding_active() {
+            tracing::warn!("[Iris] Load shedding active, rejecting actor spawn");
+            return 0; // Return invalid PID
+        }
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
         let (tx, rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        self.telemetry
+            .log_event(crate::core::telemetry::TelemetryEvent::ActorSpawned {
+                pid,
+                path: "".to_string(),
+            });
         #[cfg(feature = "vortex")]
         self.vortex_genetic_history.insert(pid, (0, 0));
         self.backpressure_state
@@ -82,10 +91,19 @@ impl Runtime {
         H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
+        if self.is_load_shedding_active() {
+            tracing::warn!("[Iris] Load shedding active, rejecting actor spawn");
+            return 0;
+        }
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
         let (tx, rx) = mailbox::bounded_channel(capacity);
         self.mailboxes.insert(pid, tx.clone());
+        self.telemetry
+            .log_event(crate::core::telemetry::TelemetryEvent::ActorSpawned {
+                pid,
+                path: "".to_string(),
+            });
         #[cfg(feature = "vortex")]
         self.vortex_genetic_history.insert(pid, (0, 0));
         self.backpressure_state
@@ -149,10 +167,19 @@ impl Runtime {
         H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
+        if self.is_load_shedding_active() {
+            tracing::warn!("[Iris] Load shedding active, rejecting actor spawn");
+            return 0;
+        }
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
         let (tx, rx) = mailbox::bounded_channel(capacity);
         self.mailboxes.insert(pid, tx.clone());
+        self.telemetry
+            .log_event(crate::core::telemetry::TelemetryEvent::ActorSpawned {
+                pid,
+                path: "".to_string(),
+            });
         #[cfg(feature = "vortex")]
         self.vortex_genetic_history.insert(pid, (0, 0));
         self.backpressure_state
@@ -210,10 +237,19 @@ impl Runtime {
         H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
+        if self.is_load_shedding_active() {
+            tracing::warn!("[Iris] Load shedding active, rejecting actor spawn");
+            return 0;
+        }
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
         let (tx, rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        self.telemetry
+            .log_event(crate::core::telemetry::TelemetryEvent::ActorSpawned {
+                pid,
+                path: "".to_string(),
+            });
         #[cfg(feature = "vortex")]
         self.vortex_genetic_history.insert(pid, (0, 0));
 
@@ -265,10 +301,19 @@ impl Runtime {
         H: Fn(mailbox::Message) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
+        if self.is_load_shedding_active() {
+            tracing::warn!("[Iris] Load shedding active, rejecting actor spawn");
+            return 0;
+        }
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
         let (tx, mut rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        self.telemetry
+            .log_event(crate::core::telemetry::TelemetryEvent::ActorSpawned {
+                pid,
+                path: "".to_string(),
+            });
         #[cfg(feature = "vortex")]
         self.vortex_genetic_history.insert(pid, (0, 0));
 
@@ -287,6 +332,7 @@ impl Runtime {
             #[cfg(feature = "vortex")]
             let mut vortex_engine = rt_exit_clone.get_vortex_engine().unwrap_or_default();
 
+            let rt_inner = rt_exit_clone.clone();
             let actor_handle = tokio::spawn(async move {
                 let mut processed = 0usize;
                 #[cfg(feature = "vortex")]
@@ -294,6 +340,9 @@ impl Runtime {
                 #[cfg(not(feature = "vortex"))]
                 let dynamic_budget = budget.max(1);
                 while let Some(first_msg) = rx.recv().await {
+                    rt_inner
+                        .telemetry()
+                        .log_event(crate::core::telemetry::TelemetryEvent::MessageReceived { pid });
                     #[cfg(feature = "vortex")]
                     if rt_vortex_clone
                         .is_vortex_watchdog_enabled()
@@ -357,6 +406,9 @@ impl Runtime {
                     while processed < dynamic_budget {
                         match rx.try_recv() {
                             Some(next_msg) => {
+                                rt_inner.telemetry().log_event(
+                                    crate::core::telemetry::TelemetryEvent::MessageReceived { pid },
+                                );
                                 #[cfg(feature = "vortex")]
                                 {
                                     if vortex_engine.preempt_tick().is_err() {
@@ -488,10 +540,19 @@ impl Runtime {
     }
 
     pub fn spawn_observed_handler(&self, _budget: usize) -> Pid {
+        if self.is_load_shedding_active() {
+            tracing::warn!("[Iris] Load shedding active, rejecting actor spawn");
+            return 0;
+        }
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
         let (tx, mut rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        self.telemetry
+            .log_event(crate::core::telemetry::TelemetryEvent::ActorSpawned {
+                pid,
+                path: "".to_string(),
+            });
         #[cfg(feature = "vortex")]
         self.vortex_genetic_history.insert(pid, (0, 0));
         self.backpressure_state
@@ -507,14 +568,21 @@ impl Runtime {
 
         super::RUNTIME.spawn(async move {
             let v_clone = vec.clone();
+            let rt_inner = rt_exit_clone.clone();
             let actor_handle = tokio::spawn(async move {
                 while let Some(msg) = rx.recv().await {
+                    rt_inner
+                        .telemetry()
+                        .log_event(crate::core::telemetry::TelemetryEvent::MessageReceived { pid });
                     {
                         let mut guard = v_clone.lock().unwrap();
                         guard.push(msg);
                     }
 
                     while let Some(next_msg) = rx.try_recv() {
+                        rt_inner.telemetry().log_event(
+                            crate::core::telemetry::TelemetryEvent::MessageReceived { pid },
+                        );
                         let mut guard = v_clone.lock().unwrap();
                         guard.push(next_msg);
                     }
@@ -570,8 +638,17 @@ impl Runtime {
         H: Fn(mailbox::Message) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        if self.is_load_shedding_active() {
+            tracing::warn!("[Iris] Load shedding active, rejecting actor spawn");
+            return 0;
+        }
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
+        self.telemetry
+            .log_event(crate::core::telemetry::TelemetryEvent::ActorSpawned {
+                pid,
+                path: "".to_string(),
+            });
         #[cfg(feature = "vortex")]
         self.vortex_genetic_history.insert(pid, (0, 0));
 
@@ -627,6 +704,11 @@ impl Runtime {
 
         let (tx, mut rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        self.telemetry
+            .log_event(crate::core::telemetry::TelemetryEvent::ActorSpawned {
+                pid,
+                path: "".to_string(),
+            });
         #[cfg(feature = "vortex")]
         self.vortex_genetic_history.insert(pid, (0, 0));
 
@@ -642,6 +724,7 @@ impl Runtime {
 
         super::RUNTIME.spawn(async move {
             let h_loop = handler.clone();
+            let rt_inner = rt_exit_clone.clone();
             let actor_handle = tokio::spawn(async move {
                 let mut processed = 0usize;
                 loop {
@@ -658,6 +741,10 @@ impl Runtime {
                         break;
                     };
 
+                    rt_inner
+                        .telemetry()
+                        .log_event(crate::core::telemetry::TelemetryEvent::MessageReceived { pid });
+
                     let h = h_loop.clone();
                     (h)(first_msg).await;
                     processed += 1;
@@ -665,6 +752,9 @@ impl Runtime {
                     while processed < budget {
                         match rx.try_recv() {
                             Some(next_msg) => {
+                                rt_inner.telemetry().log_event(
+                                    crate::core::telemetry::TelemetryEvent::MessageReceived { pid },
+                                );
                                 let h = h_loop.clone();
                                 (h)(next_msg).await;
                                 processed += 1;

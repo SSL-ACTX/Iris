@@ -139,6 +139,7 @@ fn populate_module(m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_class::<PyRuntime>()?;
     m.add_class::<super::utils::PySystemMessage>()?;
+    m.add_class::<super::utils::PyRequest>()?;
     m.add_class::<super::mailbox::PyMailbox>()?;
     #[cfg(feature = "pyo3")]
     m.add_function(wrap_pyfunction!(allocate_buffer, m)?)?;

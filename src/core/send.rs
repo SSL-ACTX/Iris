@@ -3,6 +3,7 @@ use super::Runtime;
 use crate::mailbox;
 use crate::pid::Pid;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 impl Runtime {
     /// Schedule a one-shot message to be sent after `delay_ms` milliseconds.
@@ -112,8 +113,18 @@ impl Runtime {
             }
         }
         let result = if let Some(sender) = self.mailboxes.get(&pid) {
+            let len = match &msg {
+                mailbox::Message::User(b) => b.len(),
+                _ => 0,
+            };
             let res = sender.send(msg);
             if res.is_ok() {
+                self.telemetry
+                    .log_event(crate::core::telemetry::TelemetryEvent::MessageSent {
+                        from: 0, // Unknown from send API
+                        to: pid,
+                        len,
+                    });
                 self.update_backpressure_after_enqueue(pid, sender.value());
             }
             res
@@ -144,6 +155,46 @@ impl Runtime {
     /// routes through this path automatically.  It is **not** exposed to the
     /// Python bindings and is hidden from generated documentation.
     #[doc(hidden)]
+    /// Send a request to an actor and await a response.
+    /// Spawns a temporary observer actor to receive the reply.
+    pub async fn call(
+        &self,
+        pid: Pid,
+        payload: bytes::Bytes,
+        timeout: Duration,
+    ) -> Result<bytes::Bytes, String> {
+        let reply_pid = self.spawn_observed_handler(1);
+
+        let req = mailbox::Message::Request {
+            reply_to: reply_pid,
+            payload,
+        };
+
+        if self.send(pid, req).is_err() {
+            self.stop(reply_pid);
+            return Err("send failed".to_string());
+        }
+
+        let op = async {
+            loop {
+                if let Some(mailbox::Message::User(b)) =
+                    self.take_observed_message_matching(reply_pid, |_| true)
+                {
+                    return Ok(b);
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+
+        let res = match tokio::time::timeout(timeout, op).await {
+            Ok(val) => val,
+            Err(_) => Err("timeout".to_string()),
+        };
+
+        self.stop(reply_pid);
+        res
+    }
+
     pub fn send_user(&self, pid: Pid, bytes: bytes::Bytes) -> Result<(), bytes::Bytes> {
         let _ = self.ensure_virtual_actor_active(pid);
 
@@ -188,8 +239,15 @@ impl Runtime {
             }
         }
         let result = if let Some(sender) = self.mailboxes.get(&pid) {
+            let len = bytes.len();
             let res = sender.send_user_bytes(bytes);
             if res.is_ok() {
+                self.telemetry
+                    .log_event(crate::core::telemetry::TelemetryEvent::MessageSent {
+                        from: 0,
+                        to: pid,
+                        len,
+                    });
                 self.update_backpressure_after_enqueue(pid, sender.value());
                 #[cfg(feature = "vortex")]
                 if let Some(mut counts) = self.vortex_genetic_history.get_mut(&pid) {
@@ -239,7 +297,14 @@ impl Runtime {
 
         let mut accepted = 0usize;
         for payload in payloads {
+            let len = payload.len();
             if sender.send_user_bytes(payload).is_ok() {
+                self.telemetry
+                    .log_event(crate::core::telemetry::TelemetryEvent::MessageSent {
+                        from: 0,
+                        to: pid,
+                        len,
+                    });
                 accepted += 1;
             } else {
                 break;

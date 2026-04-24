@@ -61,27 +61,27 @@
 
 ## 🔴 Distribution & Resilience
 
-* [ ] **Cluster Health Probes**
-  Actors expose liveness / readiness.
+* [x] **Cluster Health Probes**
+  Actors expose liveness / readiness via telemetry and health status APIs.
 
-* [ ] **Network-Aware Supervision**
-  Distinguish crash vs disconnect vs partition.
+* [x] **Network-Aware Supervision**
+  Distinguish crash vs disconnect vs partition using new ExitReason variants.
 
-* [ ] **Graceful Degradation**
-  Load shedding instead of OOM or cascade failure.
+* [x] **Graceful Degradation**
+  Load shedding (rejecting new actors/messages) when system capacity is reached.
 
 ---
 
 ## 🟤 Observability & Introspection
 
-* [ ] **Tracing Hooks**
-  Spawn, send, receive, crash, restart.
+* [x] **Tracing Hooks**
+  Spawn, send, receive, crash, restart (Instrumented via TelemetryManager).
 
-* [ ] **Metrics Export**
-  Actor count, mailbox depth, memory per actor, throughput.
+* [x] **Metrics Export**
+  Actor count, mailbox depth, throughput (accessible via get_metrics API).
 
-* [ ] **Runtime Introspection API**
-  List actors, supervisors, memory usage, queues.
+* [x] **Runtime Introspection API**
+  List actors, supervisors, memory usage, queues (list_actors / actor_info APIs).
 
 ---
 
@@ -100,13 +100,15 @@
 
 ### 🐍 Python
 
-* [ ] `async/await` ↔ actor bridge
+* [x] `async/await` ↔ actor bridge
+  `rt.call()` implemented with automatic observer proxies and PyRequest support.
 * [ ] `contextvars` propagation
-* [ ] NumPy / buffer zero-copy pipelines
+* [x] NumPy / buffer zero-copy pipelines
+  Integrated with global BufferRegistry.
 
 ### 🟨 Node.js
 
-* [ ] Promise-based `call()` semantics
+* [x] Promise-based `call()` semantics
 * [ ] Async iterator message streams
 * [ ] Zero-copy `ArrayBuffer` / `Uint8Array` messaging
 

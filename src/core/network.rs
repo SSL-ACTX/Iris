@@ -364,7 +364,8 @@ impl NetworkManager {
                     if failures >= threshold {
                         warn!(%addr, pid, "remote monitor detected node down after {} failures", failures);
                         rt.stop(pid);
-                        rt.supervisor().notify_exit(pid);
+                        rt.supervisor()
+                            .notify_exit(pid, &mailbox::ExitReason::Disconnected);
                         break;
                     }
                     let next = Duration::from_secs_f64(curr.as_secs_f64() * factor);

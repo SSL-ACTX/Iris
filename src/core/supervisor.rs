@@ -171,7 +171,14 @@ impl Supervisor {
 
     /// Called by the runtime when a child exits. Applies the restart strategy
     /// recorded in the child's `ChildSpec` (if any).
-    pub fn notify_exit(&self, pid: Pid) {
+    pub fn notify_exit(&self, pid: Pid, reason: &mailbox::ExitReason) {
+        // Only restart if the exit was not a normal shutdown.
+        if matches!(reason, mailbox::ExitReason::Normal) {
+            self.children.remove(&pid);
+            self.restarting.remove(&pid);
+            return;
+        }
+
         // Debounce: If we are already restarting this PID, safely ignore the duplicate exit signal.
         if !self.restarting.insert(pid) {
             return;
@@ -186,8 +193,9 @@ impl Supervisor {
         };
 
         tracing::info!(
-            "[supervisor] notify_exit(pid={}) strategy={:?}",
+            "[supervisor] notify_exit(pid={}) reason={:?} strategy={:?}",
             pid,
+            reason,
             spec.strategy
         );
 
@@ -347,14 +355,30 @@ impl Runtime {
         meta: Option<String>,
     ) {
         mailboxes.remove(&pid);
-        supervisor.notify_exit(pid);
+        supervisor.notify_exit(pid, &reason);
         for entry in path_supervisors.iter() {
             let sup = entry.value();
             if sup.contains_child(pid) {
-                sup.notify_exit(pid);
+                sup.notify_exit(pid, &reason);
             }
         }
         slab.lock().unwrap().deallocate(pid);
+
+        match reason {
+            mailbox::ExitReason::Normal => {
+                rt_exit
+                    .telemetry()
+                    .log_event(crate::core::telemetry::TelemetryEvent::ActorStopped { pid });
+            }
+            _ => {
+                rt_exit.telemetry().log_event(
+                    crate::core::telemetry::TelemetryEvent::ActorCrashed {
+                        pid,
+                        reason: format!("{:?}", reason),
+                    },
+                );
+            }
+        }
 
         // structured concurrency cleanup + runtime metadata cleanup
         rt_exit.handle_exit_internal(pid);
@@ -382,16 +406,15 @@ impl Runtime {
         self.behavior_versions.remove(&pid);
         self.behavior_history.remove(&pid);
 
-        self.mailboxes.remove(&pid);
-        if self.virtual_specs.remove(&pid).is_some() {
+        if self.mailboxes.remove(&pid).is_some() {
+            self.handle_exit_internal(pid);
+        } else if self.virtual_specs.remove(&pid).is_some() {
             self.virtual_activate_locks.remove(&pid);
-            self.supervisor.notify_exit(pid);
+            self.supervisor
+                .notify_exit(pid, &mailbox::ExitReason::Normal);
             self.slab.lock().unwrap().deallocate(pid);
             self.handle_exit_internal(pid);
         }
-
-        // Cleanup metadata eagerly for non-virtual actors as well.
-        self.handle_exit_internal(pid);
     }
 
     /// Block the current thread until the actor with `pid` fully exits.

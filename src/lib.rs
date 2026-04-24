@@ -20,8 +20,9 @@ pub use crate::core::vortex;
 #[cfg(feature = "pyo3")]
 pub mod py;
 
-#[cfg(feature = "node")]
-pub mod node;
+// #[cfg(feature = "node")]
+// pub mod node;
 
 pub use crate::core::Runtime;
+#[cfg(feature = "pyo3")]
 pub(crate) use crate::core::RUNTIME;

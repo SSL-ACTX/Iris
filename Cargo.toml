@@ -42,11 +42,11 @@ napi-derive = { version = "2.14", optional = true }
 napi-build = { version = "2.0", optional = true }
 
 [features]
-default = ["pyo3", "jit"]
+default = ["pyo3"]
 pyo3 = ["dep:pyo3", "dep:pyo3-asyncio"]
 extension-module = ["pyo3/extension-module"]
 jit = ["dep:cranelift", "dep:cranelift-module", "dep:cranelift-jit", "dep:cranelift-native", "dep:wide"]
-node = ["dep:napi", "dep:napi-derive", "dep:napi-build"]
+# node = ["dep:napi", "dep:napi-derive", "dep:napi-build"]
 vortex = ["pyo3"]
 
 [dev-dependencies]

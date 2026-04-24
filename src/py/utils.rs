@@ -59,11 +59,25 @@ pub struct PySystemMessage {
     pub metadata: Option<String>,
 }
 
+#[pyclass]
+#[derive(Clone)]
+pub struct PyRequest {
+    #[pyo3(get)]
+    pub reply_to: u64,
+    #[pyo3(get)]
+    pub payload: Py<PyBytes>,
+}
+
 /// Convert a Rust `Message` into a Python object suitable
 /// for passing back to the interpreter.
 pub(crate) fn message_to_py(py: Python, msg: mailbox::Message) -> PyObject {
     match msg {
         mailbox::Message::User(b) => PyBytes::new(py, &b).into_py(py),
+        mailbox::Message::Request { reply_to, payload } => PyRequest {
+            reply_to,
+            payload: PyBytes::new(py, &payload).into(),
+        }
+        .into_py(py),
         mailbox::Message::System(mailbox::SystemMessage::Exit(info)) => {
             let reason = match info.reason {
                 mailbox::ExitReason::Normal => "normal".to_string(),
@@ -71,6 +85,8 @@ pub(crate) fn message_to_py(py: Python, msg: mailbox::Message) -> PyObject {
                 mailbox::ExitReason::Timeout => "timeout".to_string(),
                 mailbox::ExitReason::Killed => "killed".to_string(),
                 mailbox::ExitReason::Oom => "oom".to_string(),
+                mailbox::ExitReason::Disconnected => "disconnected".to_string(),
+                mailbox::ExitReason::RemotePanic => "remote_panic".to_string(),
                 mailbox::ExitReason::Other(ref s) => s.clone(),
             };
 
@@ -121,6 +137,16 @@ pub(crate) fn run_python_matcher(py: Python, matcher: &PyObject, msg: &mailbox::
             Ok(val) => val.extract::<bool>(py).unwrap_or(false),
             Err(_) => false,
         },
+        mailbox::Message::Request { reply_to, payload } => {
+            let obj = PyRequest {
+                reply_to: *reply_to,
+                payload: PyBytes::new(py, payload).into(),
+            };
+            match matcher.call1(py, (obj.into_py(py),)) {
+                Ok(val) => val.extract::<bool>(py).unwrap_or(false),
+                Err(_) => false,
+            }
+        }
         mailbox::Message::System(s) => match s {
             mailbox::SystemMessage::Exit(info) => {
                 let reason = match info.reason {
@@ -129,8 +155,11 @@ pub(crate) fn run_python_matcher(py: Python, matcher: &PyObject, msg: &mailbox::
                     mailbox::ExitReason::Timeout => "timeout".to_string(),
                     mailbox::ExitReason::Killed => "killed".to_string(),
                     mailbox::ExitReason::Oom => "oom".to_string(),
+                    mailbox::ExitReason::Disconnected => "disconnected".to_string(),
+                    mailbox::ExitReason::RemotePanic => "remote_panic".to_string(),
                     mailbox::ExitReason::Other(ref s) => s.clone(),
                 };
+
                 let obj = PySystemMessage {
                     type_name: "EXIT".to_string(),
                     target_pid: Some(info.from),

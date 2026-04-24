@@ -1,5 +1,133 @@
-use iris::{mailbox, Runtime};
+use iris::{core::telemetry::HealthStatus, mailbox, Runtime};
 use tokio::time::{sleep, timeout, Duration};
+
+#[tokio::test]
+async fn test_load_shedding_prevents_spawn() {
+    let rt = Runtime::new();
+
+    // 1. Initially disabled
+    let pid = rt.spawn_observed_handler(10);
+    assert_ne!(pid, 0);
+    rt.stop(pid);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(rt.telemetry().get_actor_count(), 0);
+
+    // 2. Enable load shedding with low capacity
+    rt.set_system_capacity(1);
+    rt.set_load_shedding(true);
+
+    let pid1 = rt.spawn_observed_handler(10);
+    assert_ne!(pid1, 0, "First spawn should succeed");
+
+    // Second spawn should fail (rejected)
+    let pid2 = rt.spawn_observed_handler(10);
+    assert_eq!(pid2, 0, "Second spawn should be rejected by load shedding");
+
+    // 3. Stop first and try again
+    rt.stop(pid1);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        rt.telemetry().get_actor_count(),
+        0,
+        "Actor count should be 0 after stop"
+    );
+
+    let pid3 = rt.spawn_observed_handler(10);
+    assert_ne!(pid3, 0, "Spawn should succeed again after freeing capacity");
+
+    rt.stop(pid3);
+}
+
+#[tokio::test]
+async fn test_load_shedding_deactivation() {
+    let rt = Runtime::new();
+    rt.set_system_capacity(0); // Everything rejected if enabled
+    rt.set_load_shedding(true);
+
+    let pid = rt.spawn_observed_handler(10);
+    assert_eq!(pid, 0);
+
+    rt.set_load_shedding(false);
+    let pid2 = rt.spawn_observed_handler(10);
+    assert_ne!(
+        pid2, 0,
+        "Spawn should succeed when load shedding is disabled"
+    );
+    rt.stop(pid2);
+}
+
+#[tokio::test]
+async fn test_core_call_response() {
+    let rt = Runtime::new();
+
+    let rt_clone = rt.clone();
+    // Spawn an actor that responds to Request
+    let pid = rt.spawn_handler_with_budget(
+        move |msg| {
+            let rt_inner = rt_clone.clone();
+            async move {
+                match msg {
+                    mailbox::Message::Request { reply_to, payload } => {
+                        // Return "pong" if "ping"
+                        if &payload[..] == b"ping" {
+                            let _ =
+                                rt_inner.send_user(reply_to, bytes::Bytes::from_static(b"pong"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        },
+        10,
+    );
+
+    let res = rt
+        .call(
+            pid,
+            bytes::Bytes::from_static(b"ping"),
+            Duration::from_secs(1),
+        )
+        .await;
+    assert_eq!(res.unwrap(), b"pong"[..]);
+}
+
+#[tokio::test]
+async fn test_core_health_introspection() {
+    let rt = Runtime::new();
+    let pid = rt.spawn_observed_handler(10);
+
+    // Default health
+    let info = rt.actor_info(pid).unwrap();
+    assert_eq!(info.get("health").unwrap(), "Ready");
+
+    // Set to Busy
+    rt.set_actor_health(pid, HealthStatus::Busy);
+    let info = rt.actor_info(pid).unwrap();
+    assert_eq!(info.get("health").unwrap(), "Busy");
+
+    // Set to Degraded
+    rt.set_actor_health(pid, HealthStatus::Degraded);
+    let info = rt.actor_info(pid).unwrap();
+    assert_eq!(info.get("health").unwrap(), "Degraded");
+}
+
+#[tokio::test]
+async fn test_core_metrics_throughput() {
+    let rt = Runtime::new();
+    let pid = rt.spawn_observed_handler(10);
+
+    for _ in 0..10 {
+        rt.send_user(pid, bytes::Bytes::from_static(b"data"))
+            .unwrap();
+    }
+
+    // Await processing
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let tel = rt.telemetry();
+    assert_eq!(tel.get_messages_sent(), 10);
+    assert_eq!(tel.get_messages_received(), 10);
+}
 
 #[tokio::test]
 async fn bounded_spawn_rejects_overflow() {

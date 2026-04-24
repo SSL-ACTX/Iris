@@ -12,14 +12,14 @@ use tokio::sync::mpsc;
 /// Underlying sender type for user messages; either unbounded or bounded.
 #[derive(Clone)]
 enum UserSender {
-    Unbounded(mpsc::UnboundedSender<Bytes>),
-    Bounded(mpsc::Sender<Bytes>),
+    Unbounded(mpsc::UnboundedSender<Message>),
+    Bounded(mpsc::Sender<Message>),
 }
 
 /// Underlying receiver type for user messages.
 enum UserReceiver {
-    Unbounded(mpsc::UnboundedReceiver<Bytes>),
-    Bounded(mpsc::Receiver<Bytes>),
+    Unbounded(mpsc::UnboundedReceiver<Message>),
+    Bounded(mpsc::Receiver<Message>),
 }
 
 /// Message is an envelope that can be either a user payload (binary blob)
@@ -31,6 +31,8 @@ pub enum ExitReason {
     Timeout,
     Killed,
     Oom,
+    Disconnected,
+    RemotePanic,
     Other(String),
 }
 
@@ -94,6 +96,7 @@ pub enum OverflowPolicy {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
     User(Bytes),
+    Request { reply_to: u64, payload: Bytes },
     System(SystemMessage),
 }
 
@@ -166,15 +169,15 @@ impl MailboxSender {
     /// For bounded user queues, policy is drop-new: error returned when full.
     pub fn send(&self, msg: Message) -> Result<(), Message> {
         match msg {
-            Message::User(b) => {
+            Message::User(_) | Message::Request { .. } => {
                 // increment counter before enqueue attempt
                 self.counter.fetch_add(1, Ordering::Relaxed);
                 let res = match &self.tx_user {
-                    UserSender::Unbounded(tx) => tx.send(b).map_err(|e| Message::User(e.0)),
-                    UserSender::Bounded(tx) => match tx.try_send(b) {
+                    UserSender::Unbounded(tx) => tx.send(msg).map_err(|e| e.0),
+                    UserSender::Bounded(tx) => match tx.try_send(msg) {
                         Ok(()) => Ok(()),
-                        Err(mpsc::error::TrySendError::Full(b)) => Err(Message::User(b)),
-                        Err(mpsc::error::TrySendError::Closed(b)) => Err(Message::User(b)),
+                        Err(mpsc::error::TrySendError::Full(m)) => Err(m),
+                        Err(mpsc::error::TrySendError::Closed(m)) => Err(m),
                     },
                 };
                 if res.is_err() {
@@ -193,13 +196,23 @@ impl MailboxSender {
     /// Convenience: send user bytes directly.
     pub fn send_user_bytes(&self, b: Bytes) -> Result<(), Bytes> {
         self.counter.fetch_add(1, Ordering::Relaxed);
+        let msg = Message::User(b);
         let res = match &self.tx_user {
-            UserSender::Unbounded(tx) => tx.send(b).map_err(|e| e.0),
-            UserSender::Bounded(tx) => match tx.try_send(b) {
+            UserSender::Unbounded(tx) => tx.send(msg).map_err(|e| match e.0 {
+                Message::User(b) => b,
+                _ => unreachable!(),
+            }),
+            UserSender::Bounded(tx) => match tx.try_send(msg) {
                 Ok(()) => Ok(()),
                 Err(err) => match err {
-                    mpsc::error::TrySendError::Full(b) => Err(b),
-                    mpsc::error::TrySendError::Closed(b) => Err(b),
+                    mpsc::error::TrySendError::Full(m) => Err(match m {
+                        Message::User(b) => b,
+                        _ => unreachable!(),
+                    }),
+                    mpsc::error::TrySendError::Closed(m) => Err(match m {
+                        Message::User(b) => b,
+                        _ => unreachable!(),
+                    }),
                 },
             },
         };
@@ -307,7 +320,7 @@ impl MailboxReceiver {
         if let Some(pos) = self
             .stash
             .iter()
-            .position(|m| matches!(m, Message::User(_)))
+            .position(|m| matches!(m, Message::User(_) | Message::Request { .. }))
         {
             let _ = self.stash.remove(pos);
             self.counter.fetch_sub(1, Ordering::Relaxed);
@@ -315,13 +328,17 @@ impl MailboxReceiver {
         }
 
         let dropped = match &mut self.rx_user {
-            UserReceiver::Unbounded(rx) => rx.try_recv().ok().is_some(),
-            UserReceiver::Bounded(rx) => rx.try_recv().ok().is_some(),
+            UserReceiver::Unbounded(rx) => rx.try_recv().ok(),
+            UserReceiver::Bounded(rx) => rx.try_recv().ok(),
         };
-        if dropped {
-            self.counter.fetch_sub(1, Ordering::SeqCst);
+        if let Some(m) = dropped {
+            if matches!(m, Message::User(_) | Message::Request { .. }) {
+                self.counter.fetch_sub(1, Ordering::SeqCst);
+            }
+            true
+        } else {
+            false
         }
-        dropped
     }
 
     /// Await a message from the mailbox, prioritizing any already-enqueued
@@ -377,13 +394,15 @@ impl MailboxReceiver {
                 user = {
                     async {
                         match &mut self.rx_user {
-                            UserReceiver::Unbounded(rx) => rx.recv().await.map(Message::User),
-                            UserReceiver::Bounded(rx) => rx.recv().await.map(Message::User),
+                            UserReceiver::Unbounded(rx) => rx.recv().await,
+                            UserReceiver::Bounded(rx) => rx.recv().await,
                         }
                     }
                 } => {
                     if let Some(m) = user {
-                        self.counter.fetch_sub(1, Ordering::SeqCst);
+                        if matches!(m, Message::User(_) | Message::Request { .. }) {
+                            self.counter.fetch_sub(1, Ordering::SeqCst);
+                        }
                         return Some(m);
                     } else {
                         return None;
@@ -424,7 +443,7 @@ impl MailboxReceiver {
 
             // Deliver deferred user messages first, then try underlying channel.
             if let Some(front) = self.stash.pop_front() {
-                if matches!(front, Message::User(_)) {
+                if matches!(front, Message::User(_) | Message::Request { .. }) {
                     self.counter.fetch_sub(1, Ordering::SeqCst);
                 }
                 return Some(front);
@@ -434,9 +453,11 @@ impl MailboxReceiver {
                 UserReceiver::Unbounded(rx) => rx.try_recv().ok(),
                 UserReceiver::Bounded(rx) => rx.try_recv().ok(),
             };
-            return opt.map(|b| {
-                self.counter.fetch_sub(1, Ordering::SeqCst);
-                Message::User(b)
+            return opt.map(|m| {
+                if matches!(m, Message::User(_) | Message::Request { .. }) {
+                    self.counter.fetch_sub(1, Ordering::SeqCst);
+                }
+                m
             });
         }
     }
@@ -461,8 +482,10 @@ impl MailboxReceiver {
         // First, search stash for a matching message (preserve ordering).
         if let Some(idx) = self.stash.iter().position(&mut matcher) {
             let m = self.stash.remove(idx);
-            if let Some(Message::User(_)) = m.as_ref() {
-                self.counter.fetch_sub(1, Ordering::SeqCst);
+            if let Some(m_ref) = m.as_ref() {
+                if matches!(m_ref, Message::User(_) | Message::Request { .. }) {
+                    self.counter.fetch_sub(1, Ordering::SeqCst);
+                }
             }
             return m;
         }
@@ -508,15 +531,17 @@ impl MailboxReceiver {
                 user = {
                     async {
                         match &mut self.rx_user {
-                            UserReceiver::Unbounded(rx) => rx.recv().await.map(Message::User),
-                            UserReceiver::Bounded(rx) => rx.recv().await.map(Message::User),
+                            UserReceiver::Unbounded(rx) => rx.recv().await,
+                            UserReceiver::Bounded(rx) => rx.recv().await,
                         }
                     }
                 } => {
                     match user {
                         Some(m) => {
                             if matcher(&m) {
-                                self.counter.fetch_sub(1, Ordering::SeqCst);
+                                if matches!(m, Message::User(_) | Message::Request { .. }) {
+                                    self.counter.fetch_sub(1, Ordering::SeqCst);
+                                }
                                 return Some(m);
                             } else {
                                 self.stash.push_back(m);

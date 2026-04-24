@@ -436,6 +436,27 @@ impl PyRuntime {
         }
     }
 
+    /// Send a request and await a response (async).
+    fn call<'py>(
+        &self,
+        py: Python<'py>,
+        pid: u64,
+        data: &PyAny,
+        timeout: Option<f64>,
+    ) -> PyResult<&'py PyAny> {
+        let rt = self.inner.clone();
+        let payload = py_any_to_bytes(data)?;
+        let to = timeout.unwrap_or(5.0);
+        let duration = Duration::from_secs_f64(to);
+
+        future_into_py::<_, PyObject>(py, async move {
+            rt.call(pid, payload, duration)
+                .await
+                .map(|b| Python::with_gil(|py| PyBytes::new(py, &b).into_py(py)))
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        })
+    }
+
     /// Spawns a push-based actor (original behavior).
     /// The `py_callable` is called with each message as an argument.
     /// If `release_gil` is true, the Python callback and hot-swap are executed
@@ -461,9 +482,8 @@ impl PyRuntime {
         )?;
 
         let handler = move |msg: crate::mailbox::Message| {
-            let b = behavior.clone();
-            let tx = maybe_tx.clone();
-            let release_gil = release;
+            let behavior = behavior.clone();
+            let maybe_tx = maybe_tx.clone();
             let pid_holder = pid_holder_clone.clone();
             let rt = rt.clone();
             async move {
@@ -471,7 +491,7 @@ impl PyRuntime {
                     return;
                 }
 
-                if let Some(tx) = &tx {
+                if let Some(tx) = &maybe_tx {
                     // dedicated-thread path: translate to PoolTask
                     match msg {
                         crate::mailbox::Message::User(bytes) => {
@@ -484,15 +504,35 @@ impl PyRuntime {
                             let task = DedicatedPoolTask::HotSwap(ptr);
                             let _ = tx.send(task);
                         }
+                        crate::mailbox::Message::Request { .. } => {
+                            let success = Python::with_gil(|py| {
+                                let guard = behavior.read();
+                                let cb = guard.as_ref(py);
+                                let py_msg = message_to_py(py, msg);
+                                let mut ok = true;
+                                run_py_rescue_blocking(|| {
+                                    ok = crate::py::utils::run_python_callback_py(py, |_py| {
+                                        cb.call1((py_msg,)).map(|_| ())
+                                    });
+                                });
+                                ok
+                            });
+                            if !success {
+                                let pid = pid_holder.load(std::sync::atomic::Ordering::SeqCst);
+                                if pid != 0 {
+                                    rt.stop(pid);
+                                }
+                            }
+                        }
                         _ => {}
                     }
-                } else if release_gil {
+                } else if release {
                     // shared-pool fallback when release requested but no dedicated thread
                     match msg {
                         crate::mailbox::Message::User(bytes) => {
                             if let Some(pool) = GIL_WORKER_POOL.get() {
                                 let task = PoolTask::Execute {
-                                    behavior: b.clone(),
+                                    behavior: behavior.clone(),
                                     bytes,
                                     pid_holder: pid_holder.clone(),
                                     rt: rt.clone(),
@@ -500,7 +540,7 @@ impl PyRuntime {
                                 let _ = pool.sender.send(task);
                             } else {
                                 let success = Python::with_gil(|py| {
-                                    let guard = b.read();
+                                    let guard = behavior.read();
                                     let cb = guard.as_ref(py);
                                     let pybytes = PyBytes::new(py, &bytes);
                                     let mut ok = true;
@@ -524,7 +564,7 @@ impl PyRuntime {
                         ) => {
                             if let Some(pool) = GIL_WORKER_POOL.get() {
                                 let task = PoolTask::HotSwap {
-                                    behavior: b.clone(),
+                                    behavior: behavior.clone(),
                                     ptr,
                                 };
                                 let _ = pool.sender.send(task);
@@ -534,8 +574,28 @@ impl PyRuntime {
                                         py,
                                         ptr as *mut pyo3::ffi::PyObject,
                                     );
-                                    *b.write() = new_obj;
+                                    *behavior.write() = new_obj;
                                 });
+                            }
+                        }
+                        crate::mailbox::Message::Request { .. } => {
+                            let success = Python::with_gil(|py| {
+                                let guard = behavior.read();
+                                let cb = guard.as_ref(py);
+                                let py_msg = message_to_py(py, msg);
+                                let mut ok = true;
+                                run_py_rescue_blocking(|| {
+                                    ok = crate::py::utils::run_python_callback_py(py, |_py| {
+                                        cb.call1((py_msg,)).map(|_| ())
+                                    });
+                                });
+                                ok
+                            });
+                            if !success {
+                                let pid = pid_holder.load(std::sync::atomic::Ordering::SeqCst);
+                                if pid != 0 {
+                                    rt.stop(pid);
+                                }
                             }
                         }
                         _ => {}
@@ -549,18 +609,38 @@ impl PyRuntime {
                             Python::with_gil(|py| unsafe {
                                 let new_obj =
                                     PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject);
-                                *b.write() = new_obj;
+                                *behavior.write() = new_obj;
                             });
                         }
                         crate::mailbox::Message::User(bytes) => {
                             let success = Python::with_gil(|py| {
-                                let guard = b.read();
+                                let guard = behavior.read();
                                 let cb = guard.as_ref(py);
                                 let pybytes = PyBytes::new(py, &bytes);
                                 let mut ok = true;
                                 run_py_rescue_blocking(|| {
                                     ok = crate::py::utils::run_python_callback_py(py, |_py| {
                                         cb.call1((pybytes,)).map(|_| ())
+                                    });
+                                });
+                                ok
+                            });
+                            if !success {
+                                let pid = pid_holder.load(std::sync::atomic::Ordering::SeqCst);
+                                if pid != 0 {
+                                    rt.stop(pid);
+                                }
+                            }
+                        }
+                        crate::mailbox::Message::Request { .. } => {
+                            let success = Python::with_gil(|py| {
+                                let guard = behavior.read();
+                                let cb = guard.as_ref(py);
+                                let py_msg = message_to_py(py, msg);
+                                let mut ok = true;
+                                run_py_rescue_blocking(|| {
+                                    ok = crate::py::utils::run_python_callback_py(py, |_py| {
+                                        cb.call1((py_msg,)).map(|_| ())
                                     });
                                 });
                                 ok
@@ -611,7 +691,7 @@ impl PyRuntime {
         let rt = self.inner.clone();
 
         let handler = move |msg: crate::mailbox::Message| {
-            let b = behavior.clone();
+            let behavior = behavior.clone();
             let pid_holder = pid_holder_clone.clone();
             let rt = rt.clone();
             async move {
@@ -626,18 +706,38 @@ impl PyRuntime {
                         Python::with_gil(|py| unsafe {
                             let new_obj =
                                 PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject);
-                            *b.write() = new_obj;
+                            *behavior.write() = new_obj;
                         });
                     }
                     crate::mailbox::Message::User(bytes) => {
                         let success = Python::with_gil(|py| {
-                            let guard = b.read();
+                            let guard = behavior.read();
                             let cb = guard.as_ref(py);
                             let pybytes = PyBytes::new(py, &bytes);
                             let mut ok = true;
                             run_py_rescue_blocking(|| {
                                 ok = crate::py::utils::run_python_callback_py(py, |_py| {
                                     cb.call1((pybytes,)).map(|_| ())
+                                });
+                            });
+                            ok
+                        });
+                        if !success {
+                            let pid = pid_holder.load(std::sync::atomic::Ordering::SeqCst);
+                            if pid != 0 {
+                                rt.stop(pid);
+                            }
+                        }
+                    }
+                    crate::mailbox::Message::Request { .. } => {
+                        let success = Python::with_gil(|py| {
+                            let guard = behavior.read();
+                            let cb = guard.as_ref(py);
+                            let py_msg = message_to_py(py, msg);
+                            let mut ok = true;
+                            run_py_rescue_blocking(|| {
+                                ok = crate::py::utils::run_python_callback_py(py, |_py| {
+                                    cb.call1((py_msg,)).map(|_| ())
                                 });
                             });
                             ok
@@ -805,6 +905,26 @@ impl PyRuntime {
                                     }
                                 }
                             }
+                            crate::mailbox::Message::Request { .. } => {
+                                let success = Python::with_gil(|py| {
+                                    let guard = behavior.read();
+                                    let cb = guard.as_ref(py);
+                                    let py_msg = message_to_py(py, msg);
+                                    let mut ok = true;
+                                    run_py_rescue_blocking(|| {
+                                        ok = crate::py::utils::run_python_callback_py(py, |_py| {
+                                            cb.call1((py_msg,)).map(|_| ())
+                                        });
+                                    });
+                                    ok
+                                });
+                                if !success {
+                                    let pid = pid_holder.load(std::sync::atomic::Ordering::SeqCst);
+                                    if pid != 0 {
+                                        rt.stop(pid);
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -895,6 +1015,26 @@ impl PyRuntime {
                             let task = DedicatedPoolTask::HotSwap(ptr);
                             let _ = tx.send(task);
                         }
+                        crate::mailbox::Message::Request { .. } => {
+                            let success = Python::with_gil(|py| {
+                                let guard = behavior.read();
+                                let cb = guard.as_ref(py);
+                                let py_msg = message_to_py(py, msg);
+                                let mut ok = true;
+                                run_py_rescue_blocking(|| {
+                                    ok = crate::py::utils::run_python_callback_py(py, |_py| {
+                                        cb.call1((py_msg,)).map(|_| ())
+                                    });
+                                });
+                                ok
+                            });
+                            if !success {
+                                let pid = pid_holder.load(std::sync::atomic::Ordering::SeqCst);
+                                if pid != 0 {
+                                    rt.stop(pid);
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 } else if release {
@@ -973,6 +1113,26 @@ impl PyRuntime {
                                 run_py_rescue_blocking(|| {
                                     ok = crate::py::utils::run_python_callback_py(py, |_py| {
                                         cb.call1((pybytes,)).map(|_| ())
+                                    });
+                                });
+                                ok
+                            });
+                            if !success {
+                                let pid = pid_holder.load(std::sync::atomic::Ordering::SeqCst);
+                                if pid != 0 {
+                                    rt.stop(pid);
+                                }
+                            }
+                        }
+                        crate::mailbox::Message::Request { .. } => {
+                            let success = Python::with_gil(|py| {
+                                let guard = behavior.read();
+                                let cb = guard.as_ref(py);
+                                let py_msg = message_to_py(py, msg);
+                                let mut ok = true;
+                                run_py_rescue_blocking(|| {
+                                    ok = crate::py::utils::run_python_callback_py(py, |_py| {
+                                        cb.call1((py_msg,)).map(|_| ())
                                     });
                                 });
                                 ok
@@ -1206,6 +1366,44 @@ impl PyRuntime {
     fn unlink(&self, a: u64, b: u64) -> PyResult<()> {
         self.inner.unlink(a, b);
         Ok(())
+    }
+
+    /// List all active actor PIDs in the system.
+    fn list_actors(&self) -> PyResult<Vec<u64>> {
+        Ok(self.inner.list_actors())
+    }
+
+    /// Get detailed info about an actor as a dictionary.
+    fn actor_info(&self, pid: u64) -> PyResult<Option<std::collections::HashMap<String, String>>> {
+        Ok(self.inner.actor_info(pid))
+    }
+
+    /// Set health status for an actor.
+    /// status can be: "starting", "ready", "busy", "degraded"
+    fn set_actor_health(&self, pid: u64, status: &str) -> PyResult<()> {
+        let s = match status.to_lowercase().as_str() {
+            "starting" => crate::core::telemetry::HealthStatus::Starting,
+            "ready" => crate::core::telemetry::HealthStatus::Ready,
+            "busy" => crate::core::telemetry::HealthStatus::Busy,
+            "degraded" => crate::core::telemetry::HealthStatus::Degraded,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "invalid health status",
+                ))
+            }
+        };
+        self.inner.set_actor_health(pid, s);
+        Ok(())
+    }
+
+    /// Retrieve runtime-wide metrics.
+    fn get_metrics(&self) -> PyResult<std::collections::HashMap<String, u64>> {
+        let mut m = std::collections::HashMap::new();
+        let tel = self.inner.telemetry();
+        m.insert("actor_count".to_string(), tel.get_actor_count());
+        m.insert("messages_sent".to_string(), tel.get_messages_sent());
+        m.insert("messages_received".to_string(), tel.get_messages_received());
+        Ok(m)
     }
 
     fn watch(&self, pid: u64, strategy: &str) -> PyResult<()> {
