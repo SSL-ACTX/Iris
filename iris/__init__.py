@@ -17,13 +17,47 @@ from .jit import (
     get_quantum_cooldown,
 )
 try:
-    from .iris import PyRuntime, PySystemMessage, version, allocate_buffer, PyMailbox, register_offload
+    from .iris import (
+        PyRuntime,
+        PySystemMessage,
+        PyRequest,
+        version,
+        allocate_buffer,
+        PyMailbox,
+        register_offload,
+    )
 except ImportError:
-    from iris import PyRuntime, PySystemMessage, version, allocate_buffer, PyMailbox, register_offload
- 
+    from iris import (
+        PyRuntime,
+        PySystemMessage,
+        PyRequest,
+        version,
+        allocate_buffer,
+        PyMailbox,
+        register_offload,
+    )
+
+
 class Runtime:
     def __init__(self):
         self._inner = PyRuntime()
+
+    def call(self, pid: int, data: Union[bytes, bytearray, memoryview], timeout: Optional[float] = None) -> Awaitable[bytes]:
+        """
+        Send a request to an actor and await a response.
+
+        The target actor's handler will receive a `PyRequest` object (if it's a Python actor)
+        or a `Message::Request` (if it's a Rust actor).
+
+        Args:
+            pid: Target actor PID.
+            data: Request payload.
+            timeout: Timeout in seconds (defaults to 5.0).
+
+        Returns:
+            The response payload as bytes.
+        """
+        return self._inner.call(pid, data, timeout)
 
     def spawn(self, handler, budget: int = 100, release_gil: bool = False) -> int:
         """
@@ -285,6 +319,37 @@ class Runtime:
         """
         return self._inner.rollback_behavior(pid, steps)
 
+    def list_actors(self) -> list[int]:
+        """List all active actor PIDs in the system."""
+        return self._inner.list_actors()
+
+    def actor_info(self, pid: int) -> Optional[dict[str, str]]:
+        """Get detailed info about an actor as a dictionary."""
+        return self._inner.actor_info(pid)
+
+    def set_actor_health(self, pid: int, status: str):
+        """Set health status for an actor.
+
+        status: 'starting', 'ready', 'busy', 'degraded'.
+        """
+        self._inner.set_actor_health(pid, status)
+
+    def get_metrics(self) -> dict[str, int]:
+        """Retrieve runtime-wide metrics (actor_count, messages_sent, etc.)."""
+        return self._inner.get_metrics()
+
+    def set_system_capacity(self, cap: int):
+        """Set the maximum number of actors allowed in the system."""
+        self._inner.set_system_capacity(cap)
+
+    def set_load_shedding(self, enabled: bool):
+        """Enable or disable load shedding."""
+        self._inner.set_load_shedding(enabled)
+
+    def is_load_shedding_active(self) -> bool:
+        """Check if load shedding is currently active (system at capacity)."""
+        return self._inner.is_load_shedding_active()
+
     def selective_recv(self, pid: int, matcher: Callable, timeout: Optional[float] = None) -> Awaitable[Optional[Union[bytes, PySystemMessage]]]:
         """
         Return an awaitable that resolves when `matcher(msg)` is True.
@@ -393,4 +458,11 @@ class Runtime:
         level = self.mailbox_backpressure(pid)
         return success, level
 
-__all__ = ["Runtime", "PySystemMessage", "version", "allocate_buffer", "PyMailbox"]
+__all__ = [
+    "Runtime",
+    "PySystemMessage",
+    "PyRequest",
+    "version",
+    "allocate_buffer",
+    "PyMailbox",
+]

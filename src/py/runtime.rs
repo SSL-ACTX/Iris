@@ -1406,6 +1406,18 @@ impl PyRuntime {
         Ok(m)
     }
 
+    fn set_system_capacity(&self, cap: u64) {
+        self.inner.set_system_capacity(cap);
+    }
+
+    fn set_load_shedding(&self, enabled: bool) {
+        self.inner.set_load_shedding(enabled);
+    }
+
+    fn is_load_shedding_active(&self) -> bool {
+        self.inner.is_load_shedding_active()
+    }
+
     fn watch(&self, pid: u64, strategy: &str) -> PyResult<()> {
         use crate::supervisor::ChildSpec;
         use crate::supervisor::RestartStrategy;
