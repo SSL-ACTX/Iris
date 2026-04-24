@@ -39,7 +39,7 @@ pub(crate) fn fast_sin_approx(x: f64) -> f64 {
     if y > HALF_PI {
         y = PI - y;
     } else if y < -HALF_PI {
-        y = PI + y;
+        y += PI;
         sign = -1.0;
     }
 
@@ -77,7 +77,7 @@ pub(crate) fn fast_sin_reduce_for_poly(x: f64) -> Option<(f64, f64)> {
     if y > HALF_PI {
         y = PI - y;
     } else if y < -HALF_PI {
-        y = PI + y;
+        y += PI;
         sign = -1.0;
     }
 

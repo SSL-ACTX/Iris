@@ -100,21 +100,18 @@ impl OffloadPool {
 
         for _ in 0..size {
             let rx = rx.clone();
-            std::thread::spawn(move || loop {
-                match rx.recv() {
-                    Ok(task) => {
-                        if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
-                            break;
-                        }
-                        Python::with_gil(|py| {
-                            let func = task.func.as_ref(py);
-                            let args = task.args.as_ref(py);
-                            let kwargs = task.kwargs.as_ref().map(|k: &Py<PyDict>| k.as_ref(py));
-                            let result = func.call(args, kwargs).map(|obj| obj.into_py(py));
-                            let _ = task.resp.send(result);
-                        });
+            std::thread::spawn(move || {
+                while let Ok(task) = rx.recv() {
+                    if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                        break;
                     }
-                    Err(_) => break,
+                    Python::with_gil(|py| {
+                        let func = task.func.as_ref(py);
+                        let args = task.args.as_ref(py);
+                        let kwargs = task.kwargs.as_ref().map(|k: &Py<PyDict>| k.as_ref(py));
+                        let result = func.call(args, kwargs).map(|obj| obj.into_py(py));
+                        let _ = task.resp.send(result);
+                    });
                 }
             });
         }
@@ -620,14 +617,12 @@ fn offload_call(
         .send(task)
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("offload queue closed"))?;
 
-    let result = py.allow_threads(move || match rx.recv() {
+    py.allow_threads(move || match rx.recv() {
         Ok(res) => res,
         Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
             "offload task canceled",
         )),
-    });
-
-    result
+    })
 }
 
 /// Directly invoke the JIT-compiled version of a Python function.

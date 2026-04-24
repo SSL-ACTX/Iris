@@ -5,7 +5,6 @@ use crate::vortex::vortex_bytecode::{
     instrument_with_probe_with_sites, opcode_meta, probe_injection_sites, probe_instructions,
     quickening_support, read_exception_entries, validate_probe_compatibility, verify_cache_layout,
     verify_exception_handler_targets, verify_exception_table_invariants, verify_stacksize_minimum,
-    QuickeningSupport,
 };
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
@@ -218,15 +217,15 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
 
     let quickening = match quickening_support(py) {
         Ok(q) => q,
-        Err(e) => {
-            transmute_log(&format!(
-                "[Ocular][Transmute] quickening metadata unavailable fn={} err={} (continuing cache-agnostic)",
-                fn_name, e
-            ));
-            QuickeningSupport {
-                cache_opcode: None,
-                inline_cache_entries: Vec::new(),
-            }
+        Err(_) => {
+            set_guard_telemetry(
+                "fallback",
+                "quickening_metadata_unavailable",
+                py_minor,
+                false,
+                false,
+            );
+            return fallback_with_log(py, py_func, &fn_name, "quickening metadata unavailable");
         }
     };
 
@@ -287,8 +286,29 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             );
         }
     };
+
+    if test_hook_enabled(
+        py,
+        "IRIS_VORTEX_TEST_FORCE_EXCEPTION_TABLE_METADATA_UNAVAILABLE",
+    ) {
+        set_guard_telemetry(
+            "fallback",
+            "exception_table_metadata_unavailable",
+            py_minor,
+            false,
+            false,
+        );
+        return fallback_with_log(
+            py,
+            py_func,
+            &fn_name,
+            "exception table metadata unavailable",
+        );
+    }
+
     if verify_exception_table_invariants(&original_entries, raw.len() / 2, original_stack_size)
         .is_err()
+        || test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_EXCEPTION_TABLE_INVALID")
     {
         set_guard_telemetry(
             "fallback",
@@ -398,6 +418,11 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             return fallback_with_log(py, py_func, &fn_name, "probe extraction failed");
         }
     };
+
+    if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_PROBE_EXTRACTION_FAILED") {
+        set_guard_telemetry("fallback", "probe_extraction_failed", py_minor, true, false);
+        return fallback_with_log(py, py_func, &fn_name, "probe extraction failed");
+    }
 
     if let Err(reason) = validate_probe_compatibility(&probe, &quickening) {
         set_guard_telemetry("fallback", reason, py_minor, true, false);

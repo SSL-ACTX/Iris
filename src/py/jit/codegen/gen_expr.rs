@@ -148,6 +148,7 @@ fn gen_var(
     fb.ins().load(types::F64, MemFlags::new(), addr1, 0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gen_binop(
     lhs: &Expr,
     op: &str,
@@ -173,7 +174,7 @@ fn gen_binop(
             let fid = module
                 .declare_function("fmod", Linkage::Import, &sig)
                 .expect("failed to declare fmod");
-            let local = module.declare_func_in_func(fid, &mut fb.func);
+            let local = module.declare_func_in_func(fid, fb.func);
             let call = fb.ins().call(local, &[l, r]);
             fb.inst_results(call)[0]
         }
@@ -193,7 +194,7 @@ fn gen_binop(
                     let fid = module
                         .declare_function("sqrt", Linkage::Import, &sig)
                         .expect("failed to declare sqrt");
-                    let local = module.declare_func_in_func(fid, &mut fb.func);
+                    let local = module.declare_func_in_func(fid, fb.func);
                     let call = fb.ins().call(local, &[l]);
                     return fb.inst_results(call)[0];
                 }
@@ -225,7 +226,7 @@ fn gen_binop(
             let fid = module
                 .declare_function("pow", Linkage::Import, &sig)
                 .expect("failed to declare pow");
-            let local = module.declare_func_in_func(fid, &mut fb.func);
+            let local = module.declare_func_in_func(fid, fb.func);
             let call = fb.ins().call(local, &[l, r]);
             fb.inst_results(call)[0]
         }
@@ -285,6 +286,7 @@ fn gen_unaryop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gen_ternary(
     cond: &Expr,
     then_expr: &Expr,
@@ -374,7 +376,7 @@ fn gen_call(
                 let func_id = module
                     .declare_function(target, Linkage::Import, &sig)
                     .expect("failed to declare external function");
-                let local = module.declare_func_in_func(func_id, &mut fb.func);
+                let local = module.declare_func_in_func(func_id, fb.func);
                 let call = fb.ins().call(local, &arg_vals);
                 return fb.inst_results(call)[0];
             }
@@ -434,7 +436,7 @@ fn gen_call(
                 let func_id = module
                     .declare_function(helper_name, Linkage::Import, &sig)
                     .expect("failed to declare named jit invoke helper");
-                let local = module.declare_func_in_func(func_id, &mut fb.func);
+                let local = module.declare_func_in_func(func_id, fb.func);
                 let call = fb.ins().call(local, &arg_vals);
                 return fb.inst_results(call)[0];
             }
@@ -497,7 +499,7 @@ fn gen_call(
     let func_id = module
         .declare_function(&symbol, Linkage::Import, &sig)
         .expect("failed to declare external function");
-    let local = module.declare_func_in_func(func_id, &mut fb.func);
+    let local = module.declare_func_in_func(func_id, fb.func);
     let call = fb.ins().call(local, &arg_vals);
     fb.inst_results(call)[0]
 }
@@ -796,6 +798,7 @@ fn gen_sum_while(
     fb.ins().f64const(0.0) // Fallback
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gen_any_for(
     iter_var: &str,
     start: &Expr,
@@ -919,6 +922,7 @@ fn gen_any_for(
     fb.block_params(exit_block)[0]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gen_all_for(
     iter_var: &str,
     start: &Expr,
@@ -1042,6 +1046,7 @@ fn gen_all_for(
     fb.block_params(exit_block)[0]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gen_sum_for(
     iter_var: &str,
     start: &Expr,

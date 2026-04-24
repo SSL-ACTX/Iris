@@ -40,7 +40,7 @@ pub(crate) enum BufferElemType {
 
 thread_local! {
     static TLS_JIT_MODULE: std::cell::RefCell<Option<JITModule>> =
-    std::cell::RefCell::new(None);
+    const { std::cell::RefCell::new(None) };
 }
 
 thread_local! {

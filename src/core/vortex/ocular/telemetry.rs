@@ -47,7 +47,9 @@ pub fn telemetry_worker() {
                         ..
                     } => {
                         if let Some(code_obj) = code {
-                            if !code_registry.contains_key(&code_ptr) {
+                            if let std::collections::hash_map::Entry::Vacant(e) =
+                                code_registry.entry(code_ptr)
+                            {
                                 Python::with_gil(|py| {
                                     let bound_code = code_obj.as_ref(py);
 
@@ -126,17 +128,14 @@ pub fn telemetry_worker() {
                                         .and_then(|f| f.extract::<i32>())
                                         .unwrap_or(-1);
 
-                                    code_registry.insert(
-                                        code_ptr,
-                                        CodeMeta {
-                                            name: func_name,
-                                            code_obj: code_obj.clone_ref(py),
-                                            base_opcodes,
-                                            valid_offsets,
-                                            filename,
-                                            firstlineno,
-                                        },
-                                    );
+                                    e.insert(CodeMeta {
+                                        name: func_name,
+                                        code_obj: code_obj.clone_ref(py),
+                                        base_opcodes,
+                                        valid_offsets,
+                                        filename,
+                                        firstlineno,
+                                    });
                                 });
                             }
                         }
@@ -424,7 +423,7 @@ pub fn telemetry_worker() {
     for ((code_ptr, offset), hits) in instruction_hits {
         observed_by_code
             .entry(code_ptr)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((offset, hits));
     }
     let compact_map: HashMap<usize, Vec<i32>> = observed_by_code

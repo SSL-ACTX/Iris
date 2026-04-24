@@ -10,7 +10,15 @@ impl RescuePool {
     pub fn new() -> Self {
         RescuePool { active_count: 0 }
     }
+}
 
+impl Default for RescuePool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RescuePool {
     pub fn run_blocking<F, R>(f: F) -> R
     where
         F: FnOnce() -> R,

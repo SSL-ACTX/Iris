@@ -26,6 +26,12 @@ pub struct VortexExecutionContext {
     pub done: bool,
 }
 
+impl Default for VortexExecutionContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VortexExecutionContext {
     pub fn new() -> Self {
         VortexExecutionContext {

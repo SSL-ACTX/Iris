@@ -26,17 +26,12 @@ pub enum ReductionMode {
     All,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum JitReturnType {
+    #[default]
     Float,
     Int,
     Bool,
-}
-
-impl Default for JitReturnType {
-    fn default() -> Self {
-        JitReturnType::Float
-    }
 }
 
 #[derive(Clone)]

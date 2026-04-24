@@ -1,8 +1,7 @@
-// src/network.rs
 //! Distributed Networking, Remote Resolution, and Heartbeat Monitoring
 
-use crate::mailbox::Message;
-use crate::pid::Pid;
+use crate::core::mailbox::{self, Message};
+use crate::core::pid::Pid;
 use bytes::{BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
@@ -13,24 +12,20 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{timeout, Duration};
 use tracing::{debug, info, warn};
 
+use super::Runtime;
+
 /// Current binary protocol version.  Peers must match or the connection is
 /// immediately dropped.  Future releases will bump this when the wire format
 /// changes; nodes on mixed-version clusters should handle rejections gracefully.
 const PROTOCOL_VERSION: u8 = 1;
 
 /// How large a single user payload can be before the connection is torn down.
-#[cfg(test)]
+#[allow(dead_code)]
 const MAX_PAYLOAD_LEN: usize = 1024 * 1024; // 1 MiB
 
 /// How many bytes a service name may contain when doing a remote resolve.
-#[cfg(test)]
 #[allow(dead_code)]
 const MAX_NAME_LEN: usize = 1024;
-
-/// Default I/O timeout if the runtime has not overridden it.
-#[cfg(test)]
-#[allow(dead_code)]
-const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Global connection pool for multiplexing outgoing messages to remote peers.
 static PEER_POOL: Lazy<DashMap<String, tokio::sync::mpsc::Sender<Bytes>>> = Lazy::new(DashMap::new);
@@ -56,11 +51,11 @@ impl TryFrom<u8> for MessageType {
 }
 
 pub struct NetworkManager {
-    runtime: Arc<crate::Runtime>,
+    runtime: Arc<Runtime>,
 }
 
 impl NetworkManager {
-    pub fn new(runtime: Arc<crate::Runtime>) -> Self {
+    pub fn new(runtime: Arc<Runtime>) -> Self {
         Self { runtime }
     }
 
@@ -132,7 +127,7 @@ impl NetworkManager {
     }
 
     /// Core connection loop using buffered reads for performance.
-    async fn handle_connection(socket: TcpStream, rt: Arc<crate::Runtime>) -> io::Result<()> {
+    async fn handle_connection(socket: TcpStream, rt: Arc<Runtime>) -> io::Result<()> {
         let io_timeout = rt.get_network_io_timeout();
         let (read_half, mut write_half) = socket.into_split();
         let mut reader = BufReader::new(read_half);
@@ -387,12 +382,192 @@ impl NetworkManager {
     }
 }
 
-// ------ tests ---------------------------------------------------------------
+impl Runtime {
+    /// Set the network I/O timeout used by all operations.
+    pub fn set_network_io_timeout(&self, t: Duration) {
+        *self.network_io_timeout.lock().unwrap() = t;
+    }
+
+    /// Get configured network I/O timeout.
+    pub fn get_network_io_timeout(&self) -> Duration {
+        *self.network_io_timeout.lock().unwrap()
+    }
+
+    /// Adjust maximum allowed payload length for send_remote (bytes).
+    pub fn set_network_max_payload(&self, bytes: usize) {
+        *self.network_max_payload.lock().unwrap() = bytes;
+    }
+
+    /// Get current payload limit.
+    pub fn get_network_max_payload(&self) -> usize {
+        *self.network_max_payload.lock().unwrap()
+    }
+
+    /// Adjust maximum allowed name length for remote resolve.
+    pub fn set_network_max_name_len(&self, bytes: usize) {
+        *self.network_max_name_len.lock().unwrap() = bytes;
+    }
+
+    /// Get current name length limit.
+    pub fn get_network_max_name_len(&self) -> usize {
+        *self.network_max_name_len.lock().unwrap()
+    }
+
+    /// Configure exponential backoff parameters for `monitor_remote`.
+    ///
+    /// `factor` is multiplied after each failure, capped by `max`.
+    /// `failure_threshold` is how many consecutive failures must occur before
+    /// the supervisor is notified.
+    pub fn set_monitor_backoff(&self, factor: f64, max: Duration, failure_threshold: usize) {
+        *self.monitor_backoff_factor.lock().unwrap() = factor;
+        *self.monitor_backoff_max.lock().unwrap() = max;
+        *self.monitor_failure_threshold.lock().unwrap() = failure_threshold;
+    }
+
+    pub fn get_monitor_backoff_factor(&self) -> f64 {
+        *self.monitor_backoff_factor.lock().unwrap()
+    }
+    pub fn get_monitor_backoff_max(&self) -> Duration {
+        *self.monitor_backoff_max.lock().unwrap()
+    }
+    pub fn get_monitor_failure_threshold(&self) -> usize {
+        *self.monitor_failure_threshold.lock().unwrap()
+    }
+
+    // --- Distributed Networking ---
+
+    /// Enable the node to receive remote messages on the specified TCP address.
+    pub fn listen(&self, addr: String) {
+        let rt_handle = Arc::new(self.clone());
+        super::RUNTIME.spawn(async move {
+            let manager = NetworkManager::new(rt_handle);
+            match manager.start_server(&addr).await {
+                Ok(actual) => tracing::info!(%actual, "node is now listening for remote messages"),
+                Err(e) => eprintln!("[Iris] Network Server Error: {}", e),
+            }
+        });
+    }
+
+    /// Helper used internally when the runtime first learns about a remote
+    /// actor.  We spawn a tiny local "proxy" actor whose job is to forward
+    /// all user messages over the network to the real PID residing on the
+    /// remote node.  Proxies behave exactly like ordinary actors from the
+    /// caller's perspective (supervision, backpressure, `is_alive`, etc).
+    pub(crate) fn lookup_or_create_proxy(&self, addr: &str, remote_pid: Pid) -> Pid {
+        // if the caller accidentally passes a proxy PID that's already been
+        // created for this address, just reuse it rather than nesting
+        // proxies.
+        if let Some(entry) = self.remote_proxies.get(&remote_pid) {
+            let existing_addr = &entry.value().0;
+            if existing_addr == addr {
+                return remote_pid;
+            }
+        }
+
+        // next, check the reverse index so we can return an existing proxy
+        // without spawning a new actor.
+        if let Some(entry) = self.proxy_by_remote.get(&(addr.to_string(), remote_pid)) {
+            return *entry.value();
+        }
+
+        let addr_string = addr.to_string();
+        let remote_copy = remote_pid;
+        let rt_clone = self.clone();
+        // clone early so the closure borrow doesn't consume it permanently
+        let addr_string_clone = addr_string.clone();
+
+        // spawn a handler that simply relays user messages
+        let proxy_pid = self.spawn_actor(move |mut rx| {
+            let rt_inner = rt_clone.clone();
+            let addr_inner = addr_string_clone.clone();
+            async move {
+                while let Some(msg) = rx.recv().await {
+                    if let mailbox::Message::User(bytes) = msg {
+                        // bypass the public `send_remote` path to avoid
+                        // creating a second proxy for the same target.  send
+                        // directly through the network manager.
+                        let manager = NetworkManager::new(Arc::new(rt_inner.clone()));
+                        let _ = manager
+                            .send_remote(&addr_inner, remote_copy, bytes.clone())
+                            .await;
+                    }
+                }
+            }
+        });
+
+        // record mapping in both directions
+        self.remote_proxies
+            .insert(proxy_pid, (addr_string.clone(), remote_pid));
+        self.proxy_by_remote
+            .insert((addr_string.clone(), remote_pid), proxy_pid);
+
+        // automatically monitor the remote node; if it dies the proxy will
+        // be stopped which in turn notifies any watchers of the exit.
+        self.monitor_remote(addr_string.clone(), proxy_pid);
+
+        proxy_pid
+    }
+
+    /// Resolve a name on a remote node.
+    /// This is an async call that queries the remote node's registry.  The
+    /// `Pid` returned is not the raw remote pid – it is a local proxy that
+    /// forwards messages to the remote actor, allowing the caller to treat the
+    /// result exactly like a normal local PID.
+    pub async fn resolve_remote_async(&self, addr: String, name: String) -> Option<Pid> {
+        let manager = NetworkManager::new(Arc::new(self.clone()));
+        match manager.resolve_remote(&addr, &name).await {
+            Ok(0) => None, // Node returned 0, meaning not found
+            Ok(pid) => {
+                let proxy = self.lookup_or_create_proxy(&addr, pid);
+                Some(proxy)
+            }
+            Err(e) => {
+                eprintln!("[Iris] Remote Resolve Error: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Send a binary payload to a PID on a specific remote node.
+    pub fn send_remote(&self, addr: String, pid: Pid, data: bytes::Bytes) {
+        // convert to a proxy so that callers don't need to manage raw remote
+        // PIDs themselves.  This will spawn a proxy actor the first time we
+        // talk to a particular remote target.
+        let local = self.lookup_or_create_proxy(&addr, pid);
+        // route using the normal send path so that overflow policies and
+        // virtual activation work identically.
+        let _ = self.send_user(local, data);
+    }
+
+    /// Remote Monitoring with Heartbeat support.
+    /// Periodically probes the remote node (default 1s interval) to detect failures.
+    pub fn monitor_remote(&self, addr: String, pid: Pid) {
+        // if this pid is already a proxy for the same address we can use it
+        // directly, otherwise create/look up a proxy for the raw remote PID.
+        let local = if let Some(entry) = self.remote_proxies.get(&pid) {
+            let existing_addr = &entry.value().0;
+            if existing_addr == &addr {
+                pid
+            } else {
+                self.lookup_or_create_proxy(&addr, pid)
+            }
+        } else {
+            self.lookup_or_create_proxy(&addr, pid)
+        };
+
+        let rt_handle = Arc::new(self.clone());
+        super::RUNTIME.spawn(async move {
+            let manager = NetworkManager::new(rt_handle.clone());
+            // Probes node health at a 1000ms interval for silent failure detection
+            manager.monitor_remote(addr, local, 1000).await;
+        });
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Runtime;
+    use crate::core::Runtime;
     use bytes::BytesMut;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;

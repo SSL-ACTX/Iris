@@ -239,12 +239,12 @@ impl PyRuntime {
                 ))
             }
         };
-        Ok(self.inner.vortex_set_auto_ghost_policy(parsed))
+        Ok(self.inner.set_vortex_auto_ghost_policy(parsed))
     }
 
     #[cfg(feature = "vortex")]
     fn vortex_get_auto_ghost_policy(&self) -> PyResult<Option<String>> {
-        Ok(self.inner.vortex_auto_ghost_policy().map(|p| match p {
+        Ok(self.inner.get_vortex_auto_ghost_policy().map(|p| match p {
             VortexGhostPolicy::FirstSafePointWins => "FirstSafePointWins".to_string(),
             VortexGhostPolicy::PreferPrimary => "PreferPrimary".to_string(),
         }))
@@ -252,47 +252,47 @@ impl PyRuntime {
 
     #[cfg(feature = "vortex")]
     fn vortex_get_auto_resolution_counts(&self) -> PyResult<(u64, u64)> {
-        Ok(self.inner.vortex_auto_resolution_counts())
+        Ok(self.inner.get_vortex_auto_resolution_counts())
     }
 
     #[cfg(feature = "vortex")]
     fn vortex_get_auto_replay_count(&self) -> PyResult<u64> {
-        Ok(self.inner.vortex_auto_replay_count())
+        Ok(self.inner.get_vortex_auto_replay_count())
     }
 
     #[cfg(feature = "vortex")]
     fn vortex_reset_auto_telemetry(&self) -> PyResult<()> {
-        self.inner.vortex_reset_auto_telemetry();
+        self.inner.reset_vortex_auto_telemetry();
         Ok(())
     }
 
     #[cfg(feature = "vortex")]
     fn vortex_set_genetic_budgeting(&self, enabled: bool) -> PyResult<bool> {
-        Ok(self.inner.vortex_set_genetic_budgeting(enabled))
+        Ok(self.inner.set_vortex_genetic_budgeting(enabled))
     }
 
     #[cfg(feature = "vortex")]
     fn vortex_get_genetic_budgeting(&self) -> PyResult<bool> {
         Ok(self
             .inner
-            .vortex_genetic_budgeting_enabled()
+            .is_vortex_genetic_budgeting_enabled()
             .unwrap_or(false))
     }
 
     #[cfg(feature = "vortex")]
     fn vortex_set_genetic_thresholds(&self, low: f64, high: f64) -> PyResult<bool> {
-        Ok(self.inner.vortex_set_genetic_thresholds(low, high))
+        Ok(self.inner.set_vortex_genetic_thresholds(low, high))
     }
 
     #[cfg(feature = "vortex")]
     fn vortex_get_genetic_thresholds(&self) -> PyResult<Option<(f64, f64)>> {
-        Ok(self.inner.vortex_genetic_thresholds())
+        Ok(self.inner.get_vortex_genetic_thresholds())
     }
 
     #[cfg(feature = "vortex")]
     fn vortex_set_isolation_disallowed_ops(&self, ops: Vec<u8>) -> PyResult<bool> {
         crate::py::vortex::set_isolation_disallowed_ops(ops.clone());
-        Ok(self.inner.vortex_set_isolation_disallowed_ops(ops))
+        Ok(self.inner.set_vortex_isolation_disallowed_ops(ops))
     }
 
     #[cfg(feature = "vortex")]
@@ -302,22 +302,22 @@ impl PyRuntime {
 
     #[cfg(feature = "vortex")]
     fn vortex_watchdog_enable(&self) -> PyResult<bool> {
-        Ok(self.inner.vortex_watchdog_enable())
+        Ok(self.inner.enable_vortex_watchdog())
     }
 
     #[cfg(feature = "vortex")]
     fn vortex_watchdog_disable(&self) -> PyResult<bool> {
-        Ok(self.inner.vortex_watchdog_disable())
+        Ok(self.inner.disable_vortex_watchdog())
     }
 
     #[cfg(feature = "vortex")]
     fn vortex_watchdog_enabled(&self) -> PyResult<Option<bool>> {
-        Ok(self.inner.vortex_watchdog_enabled())
+        Ok(self.inner.is_vortex_watchdog_enabled())
     }
 
     #[cfg(feature = "vortex")]
     fn vortex_get_genetic_history(&self, pid: u64) -> PyResult<Option<(usize, usize)>> {
-        Ok(self.inner.vortex_genetic_history(pid))
+        Ok(self.inner.get_vortex_genetic_history(pid))
     }
 
     #[cfg(feature = "vortex")]
@@ -335,15 +335,14 @@ impl PyRuntime {
     fn vortex_get_all_genetic_history(&self) -> PyResult<Vec<(u64, usize, usize)>> {
         Ok(self
             .inner
-            .vortex_get_all_genetic_history()
+            .get_all_vortex_genetic_history()
             .into_iter()
-            .map(|(pid, suspend_count, total_count)| (pid, suspend_count, total_count))
             .collect())
     }
 
     #[cfg(feature = "vortex")]
     fn vortex_reset_genetic_history(&self) -> PyResult<()> {
-        self.inner.vortex_reset_genetic_history();
+        self.inner.reset_vortex_genetic_history();
         Ok(())
     }
 
@@ -366,12 +365,7 @@ impl PyRuntime {
     /// Quick network probe to check if a node is reachable.
     /// Returns a boolean directly from the future to avoid type inference issues.
     fn is_node_up(&self, py: Python, addr: String) -> PyResult<bool> {
-        let fut = async {
-            match tokio::net::TcpStream::connect(&addr).await {
-                Ok(_) => true,
-                Err(_) => false,
-            }
-        };
+        let fut = async { tokio::net::TcpStream::connect(&addr).await.is_ok() };
 
         py.allow_threads(|| {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -1171,7 +1165,10 @@ impl PyRuntime {
     /// Retrieves messages from an observed actor.
     fn get_messages(&self, py: Python, pid: u64) -> PyResult<Vec<PyObject>> {
         if let Some(vec) = self.inner.get_observed_messages(pid) {
-            let out = vec.into_iter().map(|m| message_to_py(py, m)).collect();
+            let out = vec
+                .into_iter()
+                .map(|m| message_to_py(py, m))
+                .collect::<Vec<_>>();
             Ok(out)
         } else {
             Ok(Vec::new())
@@ -1190,7 +1187,7 @@ impl PyRuntime {
         Ok(self
             .inner
             .mailbox_backpressure(pid)
-            .map(|level| level.as_str().to_string()))
+            .map(|level: crate::mailbox::BackpressureLevel| level.as_str().to_string()))
     }
 
     fn children_count(&self) -> usize {

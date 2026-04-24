@@ -1,4 +1,3 @@
-// src/supervisor.rs
 //! Supervisor
 //!
 //! Adds small, testable supervision behaviors used by the runtime. Each child
@@ -6,7 +5,9 @@
 //! watched child exits the supervisor may restart the single child (one-for-one)
 //! or restart the whole supervised group (one-for-all).
 
-use crate::pid::Pid;
+use super::Runtime;
+use crate::core::mailbox;
+use crate::core::pid::{self, Pid};
 use dashmap::{DashMap, DashSet};
 use std::sync::{Arc, Mutex};
 
@@ -35,7 +36,7 @@ pub struct ChildSpec {
 /// - This design prevents panics during supervisor restarts caused by Python
 ///   or other foreign code used as factories; callers should ensure factories
 ///   return informative error strings to ease debugging.
-
+///
 /// Supervisor stores child specs keyed by `Pid`.
 #[derive(Default)]
 pub struct Supervisor {
@@ -53,7 +54,7 @@ pub struct Supervisor {
 
 impl Supervisor {
     fn push_unique_link(links: &DashMap<Pid, Vec<Pid>>, a: Pid, b: Pid) {
-        let mut entry = links.entry(a).or_insert_with(Vec::new);
+        let mut entry = links.entry(a).or_default();
         if !entry.contains(&b) {
             entry.push(b);
         }
@@ -328,6 +329,141 @@ impl Supervisor {
                         }
                     }
                 });
+            }
+        }
+    }
+}
+
+impl Runtime {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn finalize_actor_exit(
+        mailboxes: &DashMap<Pid, mailbox::MailboxSender>,
+        supervisor: &Arc<Supervisor>,
+        slab: &Arc<Mutex<pid::SlabAllocator>>,
+        path_supervisors: &DashMap<String, Arc<Supervisor>>,
+        rt_exit: &Runtime,
+        pid: Pid,
+        reason: mailbox::ExitReason,
+        meta: Option<String>,
+    ) {
+        mailboxes.remove(&pid);
+        supervisor.notify_exit(pid);
+        for entry in path_supervisors.iter() {
+            let sup = entry.value();
+            if sup.contains_child(pid) {
+                sup.notify_exit(pid);
+            }
+        }
+        slab.lock().unwrap().deallocate(pid);
+
+        // structured concurrency cleanup + runtime metadata cleanup
+        rt_exit.handle_exit_internal(pid);
+
+        let linked = supervisor.linked_pids(pid);
+        for lp in linked {
+            if let Some(sender) = mailboxes.get(&lp) {
+                let info = mailbox::ExitInfo {
+                    from: pid,
+                    reason: reason.clone(),
+                    metadata: meta.clone(),
+                };
+                let _ = sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
+            }
+        }
+    }
+
+    /// Stop an actor by closing its mailbox.
+    pub fn stop(&self, pid: Pid) {
+        // if this pid is a proxy, clear both maps so lookups don't return
+        // stale entries.  DashMap::remove returns the key and value pair.
+        if let Some((_key, (addr, rpid))) = self.remote_proxies.remove(&pid) {
+            self.proxy_by_remote.remove(&(addr.clone(), rpid));
+        }
+        self.behavior_versions.remove(&pid);
+        self.behavior_history.remove(&pid);
+
+        self.mailboxes.remove(&pid);
+        if self.virtual_specs.remove(&pid).is_some() {
+            self.virtual_activate_locks.remove(&pid);
+            self.supervisor.notify_exit(pid);
+            self.slab.lock().unwrap().deallocate(pid);
+            self.handle_exit_internal(pid);
+        }
+
+        // Cleanup metadata eagerly for non-virtual actors as well.
+        self.handle_exit_internal(pid);
+    }
+
+    /// Block the current thread until the actor with `pid` fully exits.
+    pub fn wait(&self, pid: Pid) {
+        super::RUNTIME.block_on(async {
+            while self.is_alive(pid) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+    }
+
+    pub fn supervisor(&self) -> Arc<Supervisor> {
+        self.supervisor.clone()
+    }
+
+    pub fn supervise(
+        &self,
+        pid: Pid,
+        factory: Arc<dyn Fn() -> Result<Pid, String> + Send + Sync>,
+        strategy: RestartStrategy,
+    ) {
+        let spec = ChildSpec { factory, strategy };
+        self.supervisor.add_child(pid, spec);
+    }
+
+    pub fn link(&self, a: Pid, b: Pid) {
+        self.supervisor.link(a, b);
+    }
+
+    pub fn unlink(&self, a: Pid, b: Pid) {
+        self.supervisor.unlink(a, b);
+    }
+
+    /// Internal helper invoked when any actor exits to maintain parent/child
+    /// state and to enforce structured concurrency.  This is called from
+    /// each spawn_* helper after the actor has torn down its mailbox and been
+    /// deallocated.
+    pub(crate) fn handle_exit_internal(&self, pid: Pid) {
+        // DashMap::remove returns (key, value); clean up if this was a proxy
+        if let Some((_key, (addr, rpid))) = self.remote_proxies.remove(&pid) {
+            self.proxy_by_remote.remove(&(addr.clone(), rpid));
+        }
+        self.backpressure_state.remove(&pid);
+        self.bounded_capacity.remove(&pid);
+        self.overflow_policy.remove(&pid);
+        self.behavior_versions.remove(&pid);
+        self.behavior_history.remove(&pid);
+        self.observers.remove(&pid);
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.remove(&pid);
+        // remove the pid from its parent's child list (if any)
+        if let Some((_, parent)) = self.parent_of.remove(&pid) {
+            if let Some(mut entry) = self.children_by_parent.get_mut(&parent) {
+                entry.retain(|&p| p != pid);
+                if entry.is_empty() {
+                    self.children_by_parent.remove(&parent);
+                }
+            }
+        }
+
+        // if this pid itself is a parent, kill its current children
+        if let Some((_, children)) = self.children_by_parent.remove(&pid) {
+            for child in children {
+                // drop reverse mapping and close mailbox to stop actor
+                let _ = self.parent_of.remove(&child);
+                self.mailboxes.remove(&child);
+                self.backpressure_state.remove(&child);
+                self.bounded_capacity.remove(&child);
+                self.overflow_policy.remove(&child);
+                self.behavior_versions.remove(&child);
+                self.behavior_history.remove(&child);
+                self.observers.remove(&child);
             }
         }
     }

@@ -77,7 +77,7 @@ impl CodeFilter {
 }
 
 fn resolve_code_filter(code_ptr: usize, filename: &str, func_name: &str) -> bool {
-    let (include_ok, exclude_blocked) = if let Some(result) =
+    let (include_ok, exclude_blocked) =
         crate::vortex::ocular::state::with_pattern_set(|pattern_set| {
             let include_ok = pattern_set.include.is_empty()
                 || pattern_set
@@ -92,11 +92,8 @@ fn resolve_code_filter(code_ptr: usize, filename: &str, func_name: &str) -> bool
                     .any(|pat| filename.contains(pat) || func_name.contains(pat));
 
             (include_ok, exclude_blocked)
-        }) {
-        result
-    } else {
-        (true, false)
-    };
+        })
+        .unwrap_or((true, false));
 
     let allowed = include_ok && !exclude_blocked;
     CODE_FILTER.with(|filter| {

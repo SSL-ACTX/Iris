@@ -222,6 +222,11 @@ impl MailboxSender {
         self.counter.load(Ordering::Relaxed)
     }
 
+    /// Return true if the mailbox has no user messages.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Compute backpressure level given an optional configured capacity.
     pub fn backpressure_level(&self, capacity: Option<usize>) -> BackpressureLevel {
         if let Some(cap) = capacity {
@@ -454,7 +459,7 @@ impl MailboxReceiver {
         }
 
         // First, search stash for a matching message (preserve ordering).
-        if let Some(idx) = self.stash.iter().position(|m| matcher(m)) {
+        if let Some(idx) = self.stash.iter().position(&mut matcher) {
             let m = self.stash.remove(idx);
             if let Some(Message::User(_)) = m.as_ref() {
                 self.counter.fetch_sub(1, Ordering::SeqCst);

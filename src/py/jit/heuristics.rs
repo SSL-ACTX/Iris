@@ -500,11 +500,7 @@ pub fn optimize(expr: Expr) -> Expr {
                             }
                             let mut env = std::collections::HashMap::new();
                             env.insert(iter_var.clone(), x);
-                            let mut addv = if let Some(v) = eval_expr(&body, &env) {
-                                v
-                            } else {
-                                std::f64::NAN
-                            };
+                            let mut addv = eval_expr(&body, &env).unwrap_or(f64::NAN);
                             if let Some(pred_expr) = &pred {
                                 if let Some(pv) = eval_expr(pred_expr, &env) {
                                     if pv == 0.0 {

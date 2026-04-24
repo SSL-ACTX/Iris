@@ -203,11 +203,7 @@ pub(crate) fn compile_jit_impl(
         let func_name = format!("jit_func_{}", idx);
         let id = module
             .declare_function(&func_name, Linkage::Local, &ctx.func.signature)
-            .ok();
-        if id.is_none() {
-            return None;
-        }
-        let id = id.unwrap();
+            .ok()?;
         if let Err(err) = module.define_function(id, &mut ctx) {
             crate::py::jit::jit_log(|| format!("[Iris][jit] define_function failed: {:?}", err));
             return None;

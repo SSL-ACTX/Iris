@@ -1,10 +1,10 @@
 // src/node.rs
-#![cfg(feature = "node")]
+#![allow(clippy::all)]
 
 use crate::mailbox::{Message, SystemMessage};
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
-use napi::{JsFunction, JsObject, JsUnknown, Result};
+use napi::{JsFunction, JsUnknown, Result};
 use napi_derive::napi;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -28,7 +28,7 @@ fn message_to_js(env: &Env, msg: Message) -> Result<JsUnknown> {
             Ok(buf)
         }
         Message::System(sys) => {
-            let (type_name, target_pid) = match sys {
+            let (type_name, target_pid, reason, metadata) = match sys {
                 SystemMessage::Exit(info) => (
                     "EXIT",
                     Some(info.from as i64),
@@ -42,9 +42,10 @@ fn message_to_js(env: &Env, msg: Message) -> Result<JsUnknown> {
                     },
                     info.metadata.clone(),
                 ),
-                SystemMessage::HotSwap(_) => ("HOT_SWAP", None),
+                SystemMessage::HotSwap(_) => ("HOT_SWAP", None, None, None),
                 SystemMessage::Ping => ("PING", None, None, None),
                 SystemMessage::Pong => ("PONG", None, None, None),
+                SystemMessage::DropOld => ("DROP_OLD", None, None, None),
                 SystemMessage::Backpressure(level) => {
                     ("BACKPRESSURE", None, Some(level.as_str().to_string()), None)
                 }
@@ -134,6 +135,7 @@ impl From<Message> for WrappedMessage {
                     SystemMessage::HotSwap(_) => ("HOT_SWAP".to_string(), None, None, None),
                     SystemMessage::Ping => ("PING".to_string(), None, None, None),
                     SystemMessage::Pong => ("PONG".to_string(), None, None, None),
+                    SystemMessage::DropOld => ("DROP_OLD".to_string(), None, None, None),
                     SystemMessage::Backpressure(level) => (
                         "BACKPRESSURE".to_string(),
                         None,
@@ -160,6 +162,12 @@ impl From<Message> for WrappedMessage {
 #[napi]
 pub struct NodeRuntime {
     inner: Arc<crate::Runtime>,
+}
+
+impl Default for NodeRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[napi]
@@ -270,7 +278,7 @@ impl NodeRuntime {
         let behavior = Arc::new(parking_lot::RwLock::new(tsfn));
 
         let pid = self.inner.spawn_actor_with_budget_bounded(
-            move |mut rx| {
+            move |mut rx: crate::mailbox::MailboxReceiver| {
                 let behavior = behavior.clone();
                 async move {
                     while let Some(msg) = rx.recv().await {
@@ -327,7 +335,7 @@ impl NodeRuntime {
                         let mut guard = b.write();
                         *guard = *new_tsfn_box;
                     },
-                    crate::mailbox::Message::User(bytes) => {
+                    crate::mailbox::Message::User(_) => {
                         let guard = b.read();
                         guard.call(msg, ThreadsafeFunctionCallMode::NonBlocking);
                     }
@@ -336,9 +344,9 @@ impl NodeRuntime {
             }
         };
 
-        let pid = self
-            .inner
-            .spawn_child_with_budget(parent as u64, handler_wrapper, budget);
+        let pid =
+            self.inner
+                .spawn_child_handler_with_budget(parent as u64, handler_wrapper, budget);
         Ok(pid as i64)
     }
 
@@ -498,7 +506,7 @@ impl NodeRuntime {
         self.inner
             .rollback_behavior(pid as u64, steps as usize)
             .map(|v| v as u32)
-            .map_err(|e| Error::from_reason(e))
+            .map_err(Error::from_reason)
     }
 
     // --- Observation ---
@@ -512,7 +520,10 @@ impl NodeRuntime {
     #[napi]
     pub fn get_messages(&self, pid: i64) -> Result<Vec<WrappedMessage>> {
         if let Some(msgs) = self.inner.get_observed_messages(pid as u64) {
-            let wrapped = msgs.into_iter().map(WrappedMessage::from).collect();
+            let wrapped = msgs
+                .into_iter()
+                .map(WrappedMessage::from)
+                .collect::<Vec<_>>();
             Ok(wrapped)
         } else {
             Ok(Vec::new())

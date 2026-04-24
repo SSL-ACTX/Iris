@@ -316,7 +316,7 @@ pub(crate) fn choose_quantum_index(state: &mut QuantumState) -> usize {
     }
 
     state.total_runs = state.total_runs.saturating_add(1);
-    if state.total_runs % 16 == 0 {
+    if state.total_runs.is_multiple_of(16) {
         let rr = state.round_robin % active.len();
         state.round_robin = (rr + 1) % active.len();
         return active[rr];

@@ -45,7 +45,7 @@ async fn test_send_after_delivers_message() {
             .extract()
             .unwrap();
 
-        assert!(msgs.len() >= 1, "expected at least one delivered message");
+        assert!(!msgs.is_empty(), "expected at least one delivered message");
     });
 }
 
@@ -286,7 +286,7 @@ async fn py_send_push_loop_does_not_yield_gil_mid_burst_regression() {
             .downcast::<pyo3::types::PyList>()
             .unwrap();
         assert!(
-            items.len() > 0,
+            !items.is_empty(),
             "expected messages to be eventually processed after burst"
         );
 
@@ -573,7 +573,7 @@ async fn py_structured_concurrency_normal_and_crash() {
 
     // normal-exit scenario
     let (_parent_list, parent_cb): (pyo3::PyObject, pyo3::PyObject) =
-        Python::with_gil(|py| make_handler(py));
+        Python::with_gil(make_handler);
     let parent_pid: u64 = Python::with_gil(|py| {
         rt_py
             .as_ref(py)

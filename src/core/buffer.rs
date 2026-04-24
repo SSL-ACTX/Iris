@@ -42,8 +42,14 @@ impl BufferRegistry {
     }
 }
 
+impl Default for BufferRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn global_registry() -> &'static BufferRegistry {
     use once_cell::sync::Lazy;
-    static REG: Lazy<BufferRegistry> = Lazy::new(|| BufferRegistry::new());
+    static REG: Lazy<BufferRegistry> = Lazy::new(BufferRegistry::new);
     &REG
 }

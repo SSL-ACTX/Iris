@@ -38,18 +38,10 @@ pub static LAST_SUMMARY: Mutex<TraceSummary> = Mutex::new(TraceSummary {
 pub static OBSERVED_OFFSETS_BY_CODE: Lazy<Mutex<HashMap<usize, Vec<i32>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+#[derive(Default)]
 pub struct PatternSet {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
-}
-
-impl Default for PatternSet {
-    fn default() -> Self {
-        Self {
-            include: Vec::new(),
-            exclude: Vec::new(),
-        }
-    }
 }
 
 pub static FILTER_PATTERNS: OnceLock<RwLock<PatternSet>> = OnceLock::new();
@@ -105,7 +97,7 @@ pub fn clear_include_patterns() {
 pub fn with_pattern_set<R>(f: impl FnOnce(&PatternSet) -> R) -> Option<R> {
     if let Some(rw) = FILTER_PATTERNS.get() {
         if let Ok(guard) = rw.read() {
-            return Some(f(&*guard));
+            return Some(f(&guard));
         }
     }
     None

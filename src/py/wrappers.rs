@@ -57,16 +57,16 @@ fn allocate_buffer(py: Python, size: usize) -> PyResult<PyObject> {
             Some(capsule_destructor),
         );
         if capsule.is_null() {
-            pyo3::ffi::Py_DecRef(mv as *mut pyo3::ffi::PyObject);
+            pyo3::ffi::Py_DecRef(mv);
             global_registry().free(id);
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "failed to create capsule",
             ));
         }
 
-        let memobj = PyObject::from_owned_ptr(py, mv as *mut pyo3::ffi::PyObject);
+        let memobj = PyObject::from_owned_ptr(py, mv);
         let idobj = id.into_py(py);
-        let capobj = PyObject::from_owned_ptr(py, capsule as *mut pyo3::ffi::PyObject);
+        let capobj = PyObject::from_owned_ptr(py, capsule);
         Ok(PyTuple::new(py, &[idobj, memobj, capobj]).into())
     }
 }

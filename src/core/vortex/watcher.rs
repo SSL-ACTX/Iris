@@ -11,6 +11,12 @@ pub struct VortexWatcher {
     enabled: Arc<AtomicBool>,
 }
 
+impl Default for VortexWatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VortexWatcher {
     pub fn new() -> Self {
         VortexWatcher {

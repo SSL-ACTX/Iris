@@ -117,7 +117,7 @@ pub(crate) fn message_to_py(py: Python, msg: mailbox::Message) -> PyObject {
 /// Run a Python matcher callback against a Rust message.
 pub(crate) fn run_python_matcher(py: Python, matcher: &PyObject, msg: &mailbox::Message) -> bool {
     match msg {
-        mailbox::Message::User(b) => match matcher.call1(py, (PyBytes::new(py, &b),)) {
+        mailbox::Message::User(b) => match matcher.call1(py, (PyBytes::new(py, b),)) {
             Ok(val) => val.extract::<bool>(py).unwrap_or(false),
             Err(_) => false,
         },

@@ -3,6 +3,12 @@
 
 pub struct VortexScheduler;
 
+impl Default for VortexScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VortexScheduler {
     pub fn new() -> Self {
         VortexScheduler

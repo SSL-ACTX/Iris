@@ -16,8 +16,8 @@ use crate::py::jit::codegen::JitReturnType;
 
 static JIT_LOG_OVERRIDE: AtomicI8 = AtomicI8::new(-1); // -1 env, 0 off, 1 on
 static JIT_LOG_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
-static JIT_LOG_HOOK: OnceLock<std::sync::Mutex<Option<Box<dyn Fn(String) + Send + Sync>>>> =
-    OnceLock::new();
+type LogHook = Box<dyn Fn(String) + Send + Sync>;
+static JIT_LOG_HOOK: OnceLock<std::sync::Mutex<Option<LogHook>>> = OnceLock::new();
 
 static JIT_QUANTUM_OVERRIDE: AtomicI8 = AtomicI8::new(-1); // -1 env, 0 off, 1 on
 static JIT_QUANTUM_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();

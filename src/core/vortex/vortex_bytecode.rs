@@ -37,7 +37,7 @@ pub struct QuickeningSupport {
 const MAX_WORDCODE_BYTES: usize = 4 * 1024 * 1024;
 
 pub fn verify_wordcode_bytes(raw: &[u8]) -> Result<(), VerifyError> {
-    if raw.is_empty() || raw.len() % 2 != 0 {
+    if raw.is_empty() || !raw.len().is_multiple_of(2) {
         return Err(VerifyError::InvalidWordcodeShape);
     }
     if raw.len() > MAX_WORDCODE_BYTES {

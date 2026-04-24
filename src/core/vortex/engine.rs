@@ -24,6 +24,12 @@ pub struct VortexEngine {
     ghost_transactions: HashMap<u64, VortexTransaction>,
 }
 
+impl Default for VortexEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VortexEngine {
     pub fn new() -> Self {
         VortexEngine {

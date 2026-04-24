@@ -113,7 +113,7 @@ impl VortexTransaction {
         if self.aborted || self.committed {
             return false;
         }
-        self.committed_vio.extend(self.staged_vio.drain(..));
+        self.committed_vio.append(&mut self.staged_vio);
         self.committed = true;
         true
     }

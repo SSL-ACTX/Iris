@@ -1,3 +1,5 @@
+#![cfg(all(feature = "pyo3", feature = "jit"))]
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use std::fs;
@@ -687,7 +689,7 @@ async fn py_jit_offload_falls_back_on_jit_error() {
             )
             .unwrap();
 
-        let args = PyTuple::new(py, &[1.0_f64, 2.0_f64]);
+        let args = PyTuple::new(py, [1.0_f64, 2.0_f64]);
         let out: f64 = offcall
             .call1(py, (variadic.clone(), args, Option::<&PyDict>::None))
             .unwrap()
@@ -866,7 +868,7 @@ async fn py_jit_offload_decorator_async() {
         assert!(decorated.as_ref(py).is_callable());
         assert!(decorated.is(&foo));
         let offcall = module.getattr(py, "offload_call").unwrap();
-        let args = PyTuple::new(py, &[3_i32]);
+        let args = PyTuple::new(py, [3_i32]);
         let ret: i32 = offcall
             .call1(py, (foo.clone(), args, Option::<&PyDict>::None))
             .unwrap()
@@ -895,7 +897,7 @@ async fn py_jit_offload_decorator_async() {
                 py,
                 (
                     foo.clone(),
-                    PyTuple::new(py, &[4.0_f64]),
+                    PyTuple::new(py, [4.0_f64]),
                     Option::<&PyDict>::None,
                 ),
             )
@@ -929,7 +931,7 @@ async fn py_jit_offload_decorator_async() {
                 py,
                 (
                     msin,
-                    PyTuple::new(py, &[std::f64::consts::PI / 2.0]),
+                    PyTuple::new(py, [std::f64::consts::PI / 2.0]),
                     Option::<&PyDict>::None,
                 ),
             )
@@ -956,7 +958,7 @@ async fn py_jit_offload_decorator_async() {
         let ret_n: f64 = jitcall
             .call1(
                 py,
-                (neg, PyTuple::new(py, &[3.0_f64]), Option::<&PyDict>::None),
+                (neg, PyTuple::new(py, [3.0_f64]), Option::<&PyDict>::None),
             )
             .unwrap()
             .extract(py)
@@ -988,7 +990,7 @@ async fn py_jit_offload_decorator_async() {
                 py,
                 (
                     mpow,
-                    PyTuple::new(py, &[2.0_f64, 3.0_f64]),
+                    PyTuple::new(py, [2.0_f64, 3.0_f64]),
                     Option::<&PyDict>::None,
                 ),
             )
@@ -1075,7 +1077,7 @@ async fn py_jit_offload_decorator_async() {
                 py,
                 (
                     cmpf.clone(),
-                    PyTuple::new(py, &[1.0_f64, 2.0_f64]),
+                    PyTuple::new(py, [1.0_f64, 2.0_f64]),
                     Option::<&PyDict>::None,
                 ),
             )
@@ -1104,7 +1106,7 @@ async fn py_jit_offload_decorator_async() {
                 py,
                 (
                     tern,
-                    PyTuple::new(py, &[2.0_f64, 1.0_f64]),
+                    PyTuple::new(py, [2.0_f64, 1.0_f64]),
                     Option::<&PyDict>::None,
                 ),
             )
@@ -1138,7 +1140,7 @@ async fn py_jit_offload_decorator_async() {
                 py,
                 (
                     cmpmix.clone(),
-                    PyTuple::new(py, &[1.0_f64, 2.0_f64, 3.0_f64]),
+                    PyTuple::new(py, [1.0_f64, 2.0_f64, 3.0_f64]),
                     Option::<&PyDict>::None,
                 ),
             )
@@ -1151,7 +1153,7 @@ async fn py_jit_offload_decorator_async() {
                 py,
                 (
                     cmpmix,
-                    PyTuple::new(py, &[3.0_f64, 2.0_f64, 2.0_f64]),
+                    PyTuple::new(py, [3.0_f64, 2.0_f64, 2.0_f64]),
                     Option::<&PyDict>::None,
                 ),
             )
@@ -1185,7 +1187,7 @@ async fn py_jit_offload_decorator_async() {
                 py,
                 (
                     sum_loop,
-                    PyTuple::new(py, &[5.0_f64]),
+                    PyTuple::new(py, [5.0_f64]),
                     Option::<&PyDict>::None,
                 ),
             )
@@ -1219,7 +1221,7 @@ async fn py_jit_offload_decorator_async() {
             py,
             (
                 bad.clone(),
-                PyTuple::new(py, &[arr]),
+                PyTuple::new(py, [arr]),
                 Option::<&PyDict>::None,
             ),
         ) {
@@ -1254,7 +1256,7 @@ async fn py_jit_offload_decorator_async() {
                 py,
                 (
                     any_pos,
-                    PyTuple::new(py, &[arr_any]),
+                    PyTuple::new(py, [arr_any]),
                     Option::<&PyDict>::None,
                 ),
             )
@@ -1288,7 +1290,7 @@ async fn py_jit_offload_decorator_async() {
                 py,
                 (
                     all_nonzero_nonneg,
-                    PyTuple::new(py, &[arr_all]),
+                    PyTuple::new(py, [arr_all]),
                     Option::<&PyDict>::None,
                 ),
             )
@@ -1313,7 +1315,7 @@ async fn py_jit_offload_decorator_async() {
         let ret_e: f64 = jitcall
             .call1(
                 py,
-                (mexp, PyTuple::new(py, &[1.0_f64]), Option::<&PyDict>::None),
+                (mexp, PyTuple::new(py, [1.0_f64]), Option::<&PyDict>::None),
             )
             .unwrap()
             .extract(py)
@@ -1344,7 +1346,7 @@ async fn py_jit_offload_decorator_async() {
                 py,
                 (
                     mlog,
-                    PyTuple::new(py, &[std::f64::consts::E]),
+                    PyTuple::new(py, [std::f64::consts::E]),
                     Option::<&PyDict>::None,
                 ),
             )
@@ -1375,11 +1377,7 @@ async fn py_jit_offload_decorator_async() {
         let ret_sqrt: f64 = jitcall
             .call1(
                 py,
-                (
-                    msqrt,
-                    PyTuple::new(py, &[16.0_f64]),
-                    Option::<&PyDict>::None,
-                ),
+                (msqrt, PyTuple::new(py, [16.0_f64]), Option::<&PyDict>::None),
             )
             .unwrap()
             .extract(py)
@@ -1408,7 +1406,7 @@ async fn py_jit_offload_decorator_async() {
         let ret_tan: f64 = jitcall
             .call1(
                 py,
-                (mtan, PyTuple::new(py, &[0.0_f64]), Option::<&PyDict>::None),
+                (mtan, PyTuple::new(py, [0.0_f64]), Option::<&PyDict>::None),
             )
             .unwrap()
             .extract(py)
@@ -1453,7 +1451,7 @@ async fn py_jit_offload_decorator_async() {
                 py,
                 (
                     md,
-                    PyTuple::new(py, &[5.0_f64, 2.0_f64]),
+                    PyTuple::new(py, [5.0_f64, 2.0_f64]),
                     Option::<&PyDict>::None,
                 ),
             )
@@ -1506,7 +1504,7 @@ async fn py_jit_offload_decorator_async() {
                 py,
                 (
                     dsin,
-                    PyTuple::new(py, &[std::f64::consts::PI / 2.0]),
+                    PyTuple::new(py, [std::f64::consts::PI / 2.0]),
                     Option::<&PyDict>::None,
                 ),
             )
@@ -1533,11 +1531,7 @@ async fn py_jit_offload_decorator_async() {
         let ret_ab: f64 = jitcall
             .call1(
                 py,
-                (
-                    fabsf,
-                    PyTuple::new(py, &[-4.0_f64]),
-                    Option::<&PyDict>::None,
-                ),
+                (fabsf, PyTuple::new(py, [-4.0_f64]), Option::<&PyDict>::None),
             )
             .unwrap()
             .extract(py)
@@ -1553,7 +1547,7 @@ async fn py_jit_offload_decorator_async() {
         .unwrap();
         let buf = locals.get_item("buf").unwrap();
         let ret3: f64 = jitcall
-            .call1(py, (bar, PyTuple::new(py, &[buf]), Option::<&PyDict>::None))
+            .call1(py, (bar, PyTuple::new(py, [buf]), Option::<&PyDict>::None))
             .unwrap()
             .extract(py)
             .unwrap();

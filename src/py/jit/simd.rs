@@ -4,20 +4,15 @@
 use cranelift::prelude::settings;
 use cranelift::prelude::Configurable;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) enum SimdArch {
     Aarch64,
     Arm,
     X86_64,
     X86,
     Wasm32,
+    #[default]
     Other,
-}
-
-impl Default for SimdArch {
-    fn default() -> Self {
-        Self::Other
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

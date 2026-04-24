@@ -25,7 +25,15 @@ impl SlabAllocator {
             free_list: Vec::new(),
         }
     }
+}
 
+impl Default for SlabAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SlabAllocator {
     /// Allocate a new slot and return its `Pid`.
     pub fn allocate(&mut self) -> Pid {
         if let Some(idx) = self.free_list.pop() {

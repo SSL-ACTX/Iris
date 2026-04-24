@@ -146,8 +146,8 @@ fn try_execute_lowered_vector_kernel(
                         let mut lane_any = [false; 4];
                         let mut i = 0;
                         while i + lanes <= len {
-                            for lane in 0..lanes {
-                                lane_any[lane] |= eval_unary(op, input_view, i + lane) != 0.0;
+                            for (lane, item) in lane_any.iter_mut().enumerate().take(lanes) {
+                                *item |= eval_unary(op, input_view, i + lane) != 0.0;
                             }
                             if lane_any[..lanes].iter().any(|v| *v) {
                                 return Some(LoweredVectorResult::Reduced(1.0));
@@ -166,8 +166,8 @@ fn try_execute_lowered_vector_kernel(
                         let mut lane_all = [true; 4];
                         let mut i = 0;
                         while i + lanes <= len {
-                            for lane in 0..lanes {
-                                lane_all[lane] &= eval_unary(op, input_view, i + lane) != 0.0;
+                            for (lane, item) in lane_all.iter_mut().enumerate().take(lanes) {
+                                *item &= eval_unary(op, input_view, i + lane) != 0.0;
                             }
                             if lane_all[..lanes].iter().any(|v| !*v) {
                                 return Some(LoweredVectorResult::Reduced(0.0));
@@ -193,8 +193,8 @@ fn try_execute_lowered_vector_kernel(
                         let mut lane_acc = [0.0_f64; 4];
                         let mut i = 0;
                         while i + lanes <= len {
-                            for lane in 0..lanes {
-                                lane_acc[lane] += eval_binary(op, lhs_view, rhs_view, i + lane);
+                            for (lane, item) in lane_acc.iter_mut().enumerate().take(lanes) {
+                                *item += eval_binary(op, lhs_view, rhs_view, i + lane);
                             }
                             i += lanes;
                         }
@@ -209,9 +209,8 @@ fn try_execute_lowered_vector_kernel(
                         let mut lane_any = [false; 4];
                         let mut i = 0;
                         while i + lanes <= len {
-                            for lane in 0..lanes {
-                                lane_any[lane] |=
-                                    eval_binary(op, lhs_view, rhs_view, i + lane) != 0.0;
+                            for (lane, item) in lane_any.iter_mut().enumerate().take(lanes) {
+                                *item |= eval_binary(op, lhs_view, rhs_view, i + lane) != 0.0;
                             }
                             if lane_any[..lanes].iter().any(|v| *v) {
                                 return Some(LoweredVectorResult::Reduced(1.0));
@@ -230,9 +229,8 @@ fn try_execute_lowered_vector_kernel(
                         let mut lane_all = [true; 4];
                         let mut i = 0;
                         while i + lanes <= len {
-                            for lane in 0..lanes {
-                                lane_all[lane] &=
-                                    eval_binary(op, lhs_view, rhs_view, i + lane) != 0.0;
+                            for (lane, item) in lane_all.iter_mut().enumerate().take(lanes) {
+                                *item &= eval_binary(op, lhs_view, rhs_view, i + lane) != 0.0;
                             }
                             if lane_all[..lanes].iter().any(|v| !*v) {
                                 return Some(LoweredVectorResult::Reduced(0.0));
@@ -283,9 +281,8 @@ fn try_execute_lowered_vector_kernel(
                     let mut lane_any = [false; 4];
                     let mut i = 0;
                     while i + lanes <= len {
-                        for lane in 0..lanes {
-                            lane_any[lane] |=
-                                lowered_expr_eval(&expr, views, i + lane, mode)? != 0.0;
+                        for (lane, item) in lane_any.iter_mut().enumerate().take(lanes) {
+                            *item |= lowered_expr_eval(&expr, views, i + lane, mode)? != 0.0;
                         }
                         if lane_any[..lanes].iter().any(|v| *v) {
                             return Some(LoweredVectorResult::Reduced(1.0));
@@ -304,9 +301,8 @@ fn try_execute_lowered_vector_kernel(
                     let mut lane_all = [true; 4];
                     let mut i = 0;
                     while i + lanes <= len {
-                        for lane in 0..lanes {
-                            lane_all[lane] &=
-                                lowered_expr_eval(&expr, views, i + lane, mode)? != 0.0;
+                        for (lane, item) in lane_all.iter_mut().enumerate().take(lanes) {
+                            *item &= lowered_expr_eval(&expr, views, i + lane, mode)? != 0.0;
                         }
                         if lane_all[..lanes].iter().any(|v| !*v) {
                             return Some(LoweredVectorResult::Reduced(0.0));
@@ -498,7 +494,7 @@ fn vec_f64_to_py(py: pyo3::Python, values: &[f64], return_type: JitReturnType) -
             let byte_slice = unsafe {
                 std::slice::from_raw_parts(
                     values.as_ptr() as *const u8,
-                    values.len() * std::mem::size_of::<f64>(),
+                    std::mem::size_of_val(values),
                 )
             };
             let py_bytes = pyo3::types::PyBytes::new(py, byte_slice);
@@ -523,6 +519,7 @@ fn vec_f64_to_py(py: pyo3::Python, values: &[f64], return_type: JitReturnType) -
 
 /// Shared execution helper for vectorized buffer evaluation (both generic and profiled).
 #[cfg(feature = "pyo3")]
+#[allow(clippy::too_many_arguments)]
 fn execute_views(
     py: pyo3::Python,
     entry: &JitEntry,
@@ -556,8 +553,8 @@ fn execute_views(
                 for lane in 0..loop_unroll {
                     let idx = i + lane;
                     let mut iter_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
-                    for j in 0..arg_count {
-                        iter_args[j] = unsafe { read_buffer_f64(&views[j], idx) };
+                    for (j, view) in views.iter().enumerate().take(arg_count) {
+                        iter_args[j] = unsafe { read_buffer_f64(view, idx) };
                     }
                     let val = f(iter_args.as_ptr());
                     if reduction_step(entry.reduction, &mut acc, val) {
@@ -572,8 +569,8 @@ fn execute_views(
             }
             while i < len {
                 let mut iter_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
-                for j in 0..arg_count {
-                    iter_args[j] = unsafe { read_buffer_f64(&views[j], i) };
+                for (j, view) in views.iter().enumerate().take(arg_count) {
+                    iter_args[j] = unsafe { read_buffer_f64(view, i) };
                 }
                 let val = f(iter_args.as_ptr());
                 if reduction_step(entry.reduction, &mut acc, val) {
@@ -588,8 +585,8 @@ fn execute_views(
                 for lane in 0..loop_unroll {
                     let idx = i + lane;
                     let mut iter_args = Vec::with_capacity(arg_count);
-                    for j in 0..arg_count {
-                        iter_args.push(unsafe { read_buffer_f64(&views[j], idx) });
+                    for view in views.iter().take(arg_count) {
+                        iter_args.push(unsafe { read_buffer_f64(view, idx) });
                     }
                     let val = f(iter_args.as_ptr());
                     if reduction_step(entry.reduction, &mut acc, val) {
@@ -604,8 +601,8 @@ fn execute_views(
             }
             while i < len {
                 let mut iter_args = Vec::with_capacity(arg_count);
-                for j in 0..arg_count {
-                    iter_args.push(unsafe { read_buffer_f64(&views[j], i) });
+                for view in views.iter().take(arg_count) {
+                    iter_args.push(unsafe { read_buffer_f64(view, i) });
                 }
                 let val = f(iter_args.as_ptr());
                 if reduction_step(entry.reduction, &mut acc, val) {
@@ -625,8 +622,8 @@ fn execute_views(
             for lane in 0..loop_unroll {
                 let idx = i + lane;
                 let mut iter_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
-                for j in 0..arg_count {
-                    iter_args[j] = unsafe { read_buffer_f64(&views[j], idx) };
+                for (j, view) in views.iter().enumerate().take(arg_count) {
+                    iter_args[j] = unsafe { read_buffer_f64(view, idx) };
                 }
                 results.push(f(iter_args.as_ptr()));
             }
@@ -634,8 +631,8 @@ fn execute_views(
         }
         while i < len {
             let mut iter_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
-            for j in 0..arg_count {
-                iter_args[j] = unsafe { read_buffer_f64(&views[j], i) };
+            for (j, view) in views.iter().enumerate().take(arg_count) {
+                iter_args[j] = unsafe { read_buffer_f64(view, i) };
             }
             results.push(f(iter_args.as_ptr()));
             i += 1;
@@ -646,8 +643,8 @@ fn execute_views(
             for lane in 0..loop_unroll {
                 let idx = i + lane;
                 let mut iter_args = Vec::with_capacity(arg_count);
-                for j in 0..arg_count {
-                    iter_args.push(unsafe { read_buffer_f64(&views[j], idx) });
+                for view in views.iter().take(arg_count) {
+                    iter_args.push(unsafe { read_buffer_f64(view, idx) });
                 }
                 results.push(f(iter_args.as_ptr()));
             }
@@ -655,8 +652,8 @@ fn execute_views(
         }
         while i < len {
             let mut iter_args = Vec::with_capacity(arg_count);
-            for j in 0..arg_count {
-                iter_args.push(unsafe { read_buffer_f64(&views[j], i) });
+            for view in views.iter().take(arg_count) {
+                iter_args.push(unsafe { read_buffer_f64(view, i) });
             }
             results.push(f(iter_args.as_ptr()));
             i += 1;
@@ -699,9 +696,8 @@ fn try_exec_trailing_count(
 
     if entry.arg_count <= MAX_FAST_ARGS {
         let mut stack_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
-        for i in 0..entry.arg_count {
-            let val = args.get_item(i)?.extract::<f64>()?;
-            stack_args[i] = val;
+        for (i, item) in stack_args.iter_mut().enumerate().take(entry.arg_count) {
+            *item = args.get_item(i)?.extract::<f64>()?;
         }
         let mut produced = 0;
         while produced + loop_unroll <= count {
@@ -767,11 +763,9 @@ fn try_exec_profiled(
                 if let Ok(item) = args.get_item(0) {
                     if let Some(view) = unsafe { open_typed_buffer(item) } {
                         if view.elem_type == elem && view.len == expected {
-                            if elem == BufferElemType::F64 {
-                                if view.is_aligned_for_f64() {
-                                    let res = f(view.as_ptr_f64());
-                                    return Ok(Some(jit_return_to_py(py, res, entry.return_type)));
-                                }
+                            if elem == BufferElemType::F64 && view.is_aligned_for_f64() {
+                                let res = f(view.as_ptr_f64());
+                                return Ok(Some(jit_return_to_py(py, res, entry.return_type)));
                             }
                             let mut converted = Vec::with_capacity(expected);
                             for i in 0..expected {
@@ -792,7 +786,7 @@ fn try_exec_profiled(
                 let mut views = Vec::with_capacity(expected);
                 let mut common_len: Option<usize> = None;
                 let mut matched = true;
-                for i in 0..expected {
+                for (i, expected_elem_type) in elem_types.iter().enumerate().take(expected) {
                     let Ok(item) = args.get_item(i) else {
                         matched = false;
                         break;
@@ -801,7 +795,7 @@ fn try_exec_profiled(
                         matched = false;
                         break;
                     };
-                    if view.elem_type != elem_types[i] {
+                    if view.elem_type != *expected_elem_type {
                         matched = false;
                         break;
                     }
@@ -838,7 +832,7 @@ fn try_exec_profiled(
                 if arg_count <= MAX_FAST_ARGS {
                     let mut stack_args = [0.0_f64; MAX_FAST_ARGS];
                     let mut scalar_mismatch = false;
-                    for i in 0..arg_count {
+                    for (i, arg) in stack_args.iter_mut().enumerate().take(arg_count) {
                         let item = unsafe { pyo3::ffi::PyTuple_GetItem(args.as_ptr(), i as isize) };
                         let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
                         if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
@@ -846,7 +840,7 @@ fn try_exec_profiled(
                             scalar_mismatch = true;
                             break;
                         }
-                        stack_args[i] = val;
+                        *arg = val;
                     }
                     if !scalar_mismatch {
                         let res = f(stack_args.as_ptr());
@@ -1089,9 +1083,8 @@ fn exec_scalar_args(
     const MAX_FAST_ARGS: usize = 8;
     if arg_count <= MAX_FAST_ARGS {
         let mut stack_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
-        for i in 0..arg_count {
-            let val = args.get_item(i)?.extract::<f64>()?;
-            stack_args[i] = val;
+        for (i, arg) in stack_args.iter_mut().enumerate().take(arg_count) {
+            *arg = args.get_item(i)?.extract::<f64>()?;
         }
         store_exec_profile(entry.func_ptr, JitExecProfile::ScalarArgs);
         let res = f(stack_args.as_ptr());

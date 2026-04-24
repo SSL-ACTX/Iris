@@ -23,7 +23,7 @@ impl BufferView {
 
     #[inline(always)]
     pub(crate) fn is_aligned_for_f64(&self) -> bool {
-        (self.view.buf as usize) % std::mem::align_of::<f64>() == 0
+        (self.view.buf as usize).is_multiple_of(std::mem::align_of::<f64>())
     }
 }
 
@@ -135,7 +135,7 @@ pub(crate) unsafe fn open_typed_buffer(obj: &pyo3::PyAny) -> Option<BufferView> 
     };
 
     let total_bytes = view.len as usize;
-    if total_bytes % itemsize != 0 {
+    if !total_bytes.is_multiple_of(itemsize) {
         pyo3::ffi::PyBuffer_Release(&mut view);
         return None;
     }
@@ -190,11 +190,11 @@ pub(crate) unsafe fn read_buffer_f64(view: &BufferView, index: usize) -> f64 {
             std::ptr::read_unaligned(p) as f64
         }
         BufferElemType::U8 => {
-            let p = base.add(index * std::mem::size_of::<u8>()) as *const u8;
+            let p = base.add(index * std::mem::size_of::<u8>());
             std::ptr::read_unaligned(p) as f64
         }
         BufferElemType::Bool => {
-            let p = base.add(index) as *const u8;
+            let p = base.add(index);
             if std::ptr::read_unaligned(p) == 0 {
                 0.0
             } else {
