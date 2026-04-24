@@ -30,6 +30,14 @@ Iris allows updating live application logic without stopping the runtime.
 - **State Preservation:** In-flight messages remain in the mailbox; only the "behavior" pointer is swapped.
 - **Versioning:** Supports rolling back to previous behavior versions.
 
+## Telemetry & Observability Layer
+
+Iris includes a built-in `TelemetryManager` that provides real-time instrumentation of the actor mesh.
+- **Event Stream:** Captures actor life-cycles (`Spawned`, `Stopped`, `Crashed`) and message throughput.
+- **Health Tracking:** Tracks actor health status (`Starting`, `Ready`, `Busy`, `Degraded`) for cluster-wide health checks.
+- **Mailbox Depth:** Provides visibility into queue depths for identifying bottlenecks.
+- **Metrics API:** Aggregated system-wide statistics available via a high-performance concurrent registry.
+
 ## Distributed Mesh Protocol
 
 Iris nodes communicate over TCP using a length-prefixed binary protocol.

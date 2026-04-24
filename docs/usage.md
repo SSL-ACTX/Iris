@@ -81,6 +81,7 @@ rt.spawn_with_mailbox(mailbox_worker)
 ## Sending messages
 
 - `send(pid: int, data: bytes-like) -> bool` — send user payload (`bytes`, `bytearray`, `memoryview`) to a PID.
+- `call(pid: int, data: bytes-like, timeout: Optional[float] = None) -> Awaitable[bytes]` — send a request and await a response (async).
 - `send_many(pid: int, payloads: Iterable[bytes-like]) -> int` — batch-send payloads and return accepted count.
 - `send_named(name: str, data: bytes-like) -> bool` — resolve and send by registered name.
 - `send_buffer(pid: int, buffer_id: int) -> bool` — zero-copy send via buffer ID (use `allocate_buffer`).
@@ -91,13 +92,53 @@ rt.spawn_with_mailbox(mailbox_worker)
 Example:
 
 ```python
-timer = rt.send_after(pid, 200, b'tick')
-# cancel
-rt.cancel_timer(timer)
+# Async request-reply
+response = await rt.call(pid, b"ping", timeout=2.0)
+print("response", response)
 
-# batch send
-accepted = rt.send_many(pid, [b"a", bytearray(b"b"), memoryview(b"c")])
-print("accepted", accepted)
+timer = rt.send_after(pid, 200, b'tick')
+```
+
+---
+
+## Observability & Introspection
+
+Iris provides deep visibility into the live runtime state via the following APIs:
+
+- `list_actors() -> list[int]` — list all active local actor PIDs.
+- `actor_info(pid: int) -> Optional[dict[str, str]]` — get metadata, health, and status for a specific actor.
+- `set_actor_health(pid: int, status: str)` — manually update actor health (e.g. `'busy'`, `'degraded'`, `'ready'`).
+- `get_metrics() -> dict[str, int]` — retrieve system-wide metrics (actor count, message throughput).
+
+Example:
+
+```python
+for pid in rt.list_actors():
+    info = rt.actor_info(pid)
+    print(f"Actor {pid}: {info['health']}")
+
+metrics = rt.get_metrics()
+print(f"Throughput: {metrics['messages_received']} msgs")
+```
+
+---
+
+## Resilience & Load Shedding
+
+To prevent cascade failures under extreme load, Iris can shed traffic by rejecting new actors and messages.
+
+- `set_system_capacity(cap: int)` — set the maximum number of concurrent actors allowed.
+- `set_load_shedding(enabled: bool)` — enable or disable the load shedding subsystem.
+- `is_load_shedding_active() -> bool` — check if the system is currently rejecting work due to capacity.
+
+Example:
+
+```python
+rt.set_system_capacity(10_000)
+rt.set_load_shedding(True)
+
+if rt.is_load_shedding_active():
+    print("Warning: System at capacity, load shedding active.")
 ```
 
 ---

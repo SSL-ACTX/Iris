@@ -17,24 +17,26 @@
 
 ## Overview
 
-**Iris** is a hybrid distributed runtime built in Rust with first-class **Python** and **Node.js** bindings. It combines three execution styles:
+**Iris** is a hybrid distributed runtime built in Rust with first-class **Python** bindings. It combines three execution styles:
 - **Actor Mesh:** Stateful, message-driven workflows with high concurrency.
 - **Native Offload/JIT:** CPU-heavy hot paths accelerated via Cranelift. This path is experimental, currently paused, and may be dropped in future releases.
-- **Cross-Language API:** Service-oriented apps mixing Rust, Python, and Node.js.
+- **Cross-Language API:** Service-oriented apps mixing Rust and Python.
 
 Iris uses a **cooperative reduction-based scheduler** for fairness, providing built-in supervision, hot swapping, discovery, and location-transparent messaging across nodes.
 
 > [!NOTE]
-> Node.js bindings are currently in Alpha and reaching feature parity with Python.
+> Node.js bindings are currently on hold and are not actively developed or supported.
 
 ---
 
 ## Core Capabilities
 
 - **Hybrid Concurrency:** Mix "Push" green-thread actors with "Pull" OS-thread actors.
-- **Atomic Hot-Swap:** Update live application logic (Python/Node) without zero downtime.
+- **Atomic Hot-Swap:** Update live application logic (Python) with zero downtime.
 - **Global Discovery:** Register and resolve named services locally or over the network.
-- **Self-Healing:** Path-scoped supervisors and structured `EXIT` reasons for fault tolerance.
+- **Resilience:** Built-in supervision, load shedding, and network-aware exit reasons for self-healing systems.
+- **Observability:** Deep runtime introspection, system metrics, and actor health tracking.
+- **Async Request/Reply:** Built-in `call()` semantics for ergonomic, awaitable actor communication.
 - **Vortex-Transmuter (Experimental):** Instruction-bound preemption, transactional ghosting primitives, and guarded bytecode transmutation with explicit fallback telemetry (see [Vortex-Transmuter Guide](docs/vortex.md)).
 - **JIT Acceleration:** Transparently compile Python math functions to native machine code.
     - **Quantum Speculation:** Optional multi-variant JIT selection with runtime telemetry, bounded by compile budget and cooldown controls (see [JIT Internals & Configuration](docs/jit.md)).
