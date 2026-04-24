@@ -16,6 +16,7 @@ from .jit import (
     set_quantum_cooldown,
     get_quantum_cooldown,
 )
+
 try:
     from .iris import (
         PyRuntime,
@@ -42,7 +43,12 @@ class Runtime:
     def __init__(self):
         self._inner = PyRuntime()
 
-    def call(self, pid: int, data: Union[bytes, bytearray, memoryview], timeout: Optional[float] = None) -> Awaitable[bytes]:
+    def call(
+        self,
+        pid: int,
+        data: Union[bytes, bytearray, memoryview],
+        timeout: Optional[float] = None,
+    ) -> Awaitable[bytes]:
         """
         Send a request to an actor and await a response.
 
@@ -75,15 +81,21 @@ class Runtime:
         """
         return self._inner.spawn_py_handler(handler, budget, release_gil)
 
-    def spawn_py_handler_bounded(self, handler, budget: int, capacity: int, release_gil: bool = False) -> int:
+    def spawn_py_handler_bounded(
+        self, handler, budget: int, capacity: int, release_gil: bool = False
+    ) -> int:
         """
         Spawn a Python handler with a bounded mailbox capacity.
 
         Returns the PID. Sending beyond capacity will fail (drop-new policy).
         """
-        return self._inner.spawn_py_handler_bounded(handler, budget, capacity, release_gil)
+        return self._inner.spawn_py_handler_bounded(
+            handler, budget, capacity, release_gil
+        )
 
-    def spawn_virtual(self, handler, budget: int = 100, idle_timeout_ms: Optional[int] = None) -> int:
+    def spawn_virtual(
+        self, handler, budget: int = 100, idle_timeout_ms: Optional[int] = None
+    ) -> int:
         """
         Reserve a lazy/virtual actor PID and activate it on first message.
 
@@ -112,7 +124,9 @@ class Runtime:
         """
         return self._inner.spawn_with_mailbox(handler, budget)
 
-    def spawn_child(self, parent: int, handler, budget: int = 100, release_gil: bool = False) -> int:
+    def spawn_child(
+        self, parent: int, handler, budget: int = 100, release_gil: bool = False
+    ) -> int:
         """
         Spawn a new actor whose lifetime is tied to `parent`.
 
@@ -141,7 +155,9 @@ class Runtime:
         Useful for pipeline workloads to avoid repeated spawn/teardown costs.
         Returns a list of worker PIDs.
         """
-        return self._inner.spawn_child_pool(parent, handler, workers, budget, release_gil)
+        return self._inner.spawn_child_pool(
+            parent, handler, workers, budget, release_gil
+        )
 
     def spawn_child_with_mailbox(self, parent: int, handler, budget: int = 100) -> int:
         """
@@ -154,7 +170,9 @@ class Runtime:
         """Send bytes-like data to a specific local PID."""
         return self._inner.send(pid, data)
 
-    def send_many(self, pid: int, payloads: Iterable[Union[bytes, bytearray, memoryview]]) -> int:
+    def send_many(
+        self, pid: int, payloads: Iterable[Union[bytes, bytearray, memoryview]]
+    ) -> int:
         """Batch-send bytes-like payloads to a PID.
 
         Returns the number of payloads accepted by the mailbox.
@@ -168,14 +186,18 @@ class Runtime:
             return self._inner.send(pid, data)
         return False
 
-    def send_after(self, pid: int, delay_ms: int, data: Union[bytes, bytearray, memoryview]) -> int:
+    def send_after(
+        self, pid: int, delay_ms: int, data: Union[bytes, bytearray, memoryview]
+    ) -> int:
         """
         Schedule a one-shot message to be sent after `delay_ms` milliseconds.
         Returns a timer ID.
         """
         return self._inner.send_after(pid, delay_ms, data)
 
-    def send_interval(self, pid: int, interval_ms: int, data: Union[bytes, bytearray, memoryview]) -> int:
+    def send_interval(
+        self, pid: int, interval_ms: int, data: Union[bytes, bytearray, memoryview]
+    ) -> int:
         """
         Schedule a repeating message to be sent every `interval_ms` milliseconds.
         Returns a timer ID.
@@ -350,7 +372,9 @@ class Runtime:
         """Check if load shedding is currently active (system at capacity)."""
         return self._inner.is_load_shedding_active()
 
-    def selective_recv(self, pid: int, matcher: Callable, timeout: Optional[float] = None) -> Awaitable[Optional[Union[bytes, PySystemMessage]]]:
+    def selective_recv(
+        self, pid: int, matcher: Callable, timeout: Optional[float] = None
+    ) -> Awaitable[Optional[Union[bytes, PySystemMessage]]]:
         """
         Return an awaitable that resolves when `matcher(msg)` is True.
 
@@ -369,7 +393,9 @@ class Runtime:
         """
         return self._inner.selective_recv_observed_py(pid, matcher, timeout)
 
-    def selective_recv_blocking(self, pid: int, matcher: Callable, timeout: Optional[float] = None) -> Optional[Union[bytes, PySystemMessage]]:
+    def selective_recv_blocking(
+        self, pid: int, matcher: Callable, timeout: Optional[float] = None
+    ) -> Optional[Union[bytes, PySystemMessage]]:
         """
         Blocking convenience wrapper around `selective_recv` for sync code.
         Runs a new asyncio event loop to await the result.
@@ -407,7 +433,9 @@ class Runtime:
         """When True, spawning with `release_gil=True` returns an error if limits are exceeded."""
         self._inner.set_release_gil_strict(strict)
 
-    def send_remote(self, addr: str, pid: int, data: Union[bytes, bytearray, memoryview]):
+    def send_remote(
+        self, addr: str, pid: int, data: Union[bytes, bytearray, memoryview]
+    ):
         """Send bytes-like data to a PID on a remote node.
 
         This helper will internally create or reuse a proxy actor, so users
@@ -446,17 +474,22 @@ class Runtime:
         """Return inferred backpressure status (NORMAL, HIGH, CRITICAL) for the actor."""
         return self._inner.mailbox_backpressure(pid)
 
-    def send_with_backpressure(self, pid: int, data: bytes) -> tuple[bool, Optional[str]]:
+    def send_with_backpressure(
+        self, pid: int, data: bytes
+    ) -> tuple[bool, Optional[str]]:
         """Send data and get instant backpressure feedback (Python wrapper)."""
         success = self.send(pid, data)
         level = self.mailbox_backpressure(pid)
         return success, level
 
-    def send_user_with_backpressure(self, pid: int, data: bytes) -> tuple[bool, Optional[str]]:
+    def send_user_with_backpressure(
+        self, pid: int, data: bytes
+    ) -> tuple[bool, Optional[str]]:
         """Send data and get instant backpressure feedback using send_user path."""
         success = self.send(pid, data)
         level = self.mailbox_backpressure(pid)
         return success, level
+
 
 __all__ = [
     "Runtime",
@@ -465,4 +498,18 @@ __all__ = [
     "version",
     "allocate_buffer",
     "PyMailbox",
+    "register_offload",
+    "offload",
+    "set_jit_logging",
+    "get_jit_logging",
+    "set_quantum_speculation",
+    "get_quantum_speculation",
+    "set_quantum_speculation_threshold",
+    "get_quantum_speculation_threshold",
+    "set_quantum_log_threshold",
+    "get_quantum_log_threshold",
+    "set_quantum_compile_budget",
+    "get_quantum_compile_budget",
+    "set_quantum_cooldown",
+    "get_quantum_cooldown",
 ]

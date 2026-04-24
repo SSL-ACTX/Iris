@@ -61,7 +61,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="One-shot benchmark for push actor send regression checks (ARM-friendly)."
     )
-    parser.add_argument("--count", type=int, default=100_000, help="Number of actors/messages")
+    parser.add_argument(
+        "--count", type=int, default=100_000, help="Number of actors/messages"
+    )
     parser.add_argument("--budget", type=int, default=10, help="Actor budget")
     parser.add_argument(
         "--payload-size",

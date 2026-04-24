@@ -26,12 +26,16 @@ def run_send_many(rt, pid):
     for _ in range(full_batches):
         accepted = rt.send_many(pid, batch)
         if accepted != BATCH_SIZE:
-            raise RuntimeError(f"send_many failed: accepted={accepted} expected={BATCH_SIZE}")
+            raise RuntimeError(
+                f"send_many failed: accepted={accepted} expected={BATCH_SIZE}"
+            )
 
     if remainder:
         accepted = rt.send_many(pid, [PAYLOAD] * remainder)
         if accepted != remainder:
-            raise RuntimeError(f"send_many remainder failed: accepted={accepted} expected={remainder}")
+            raise RuntimeError(
+                f"send_many remainder failed: accepted={accepted} expected={remainder}"
+            )
 
     return time.perf_counter() - t0
 

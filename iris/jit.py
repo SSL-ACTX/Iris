@@ -5,6 +5,7 @@ The Rust side exposes a low-level helper `register_offload` that simply
 records (and eventually compiles) a Python function.  The :func:`offload`
 wrapper makes it convenient to use from pure Python.
 """
+
 from __future__ import annotations
 
 import ast
@@ -49,8 +50,8 @@ try:
         get_quantum_compile_budget as _get_quantum_compile_budget,
         configure_quantum_cooldown as _configure_quantum_cooldown,
         get_quantum_cooldown as _get_quantum_cooldown,
-    ) 
-except ImportError: 
+    )
+except ImportError:
     register_offload = None
     offload_call = None
     call_jit = None
@@ -81,17 +82,25 @@ _IRIS_META_FILENAME = ".iris.meta.bin"
 _IRIS_META_MAGIC = b"IRSMETA1"
 _IRIS_META_FLAG_COMPRESSED = 0x1
 _IRIS_META_FLUSH_EVERY = 16
-_IRIS_META_TTL_NS = int(os.environ.get("IRIS_JIT_META_TTL_NS", str(7 * 24 * 60 * 60 * 1_000_000_000)))
+_IRIS_META_TTL_NS = int(
+    os.environ.get("IRIS_JIT_META_TTL_NS", str(7 * 24 * 60 * 60 * 1_000_000_000))
+)
 _IRIS_META_MAX_ENTRIES = int(os.environ.get("IRIS_JIT_META_MAX_ENTRIES", "256"))
 _IRIS_META_FLUSH_MIN = int(os.environ.get("IRIS_JIT_META_FLUSH_MIN", "8"))
 _IRIS_META_FLUSH_MAX = int(os.environ.get("IRIS_JIT_META_FLUSH_MAX", "128"))
-_IRIS_META_COMPRESS_MIN_BYTES = int(os.environ.get("IRIS_JIT_META_COMPRESS_MIN_BYTES", "4096"))
-_IRIS_META_REFRESH_NS = int(os.environ.get("IRIS_JIT_META_REFRESH_NS", str(6 * 60 * 60 * 1_000_000_000)))
+_IRIS_META_COMPRESS_MIN_BYTES = int(
+    os.environ.get("IRIS_JIT_META_COMPRESS_MIN_BYTES", "4096")
+)
+_IRIS_META_REFRESH_NS = int(
+    os.environ.get("IRIS_JIT_META_REFRESH_NS", str(6 * 60 * 60 * 1_000_000_000))
+)
 _IRIS_META_COUNTERS: dict[str, int] = {}
 _IRIS_META_FLUSH_INTERVALS: dict[str, int] = {}
 _IRIS_META_LAST_SIGNATURES: dict[str, str] = {}
 _IRIS_META_LAST_DEFER_COUNTS: dict[str, int] = {}
-_IRIS_META_PENDING: dict[str, tuple[Callable[..., Any], str, list[str], Optional[str]]] = {}
+_IRIS_META_PENDING: dict[
+    str, tuple[Callable[..., Any], str, list[str], Optional[str]]
+] = {}
 _IRIS_META_STATE_LOCK = threading.RLock()
 
 
@@ -129,14 +138,22 @@ def _empty_metadata_doc() -> dict[str, Any]:
 
 
 def _normalize_metadata_policy() -> tuple[int, int]:
-    ttl_ns = _IRIS_META_TTL_NS if _IRIS_META_TTL_NS > 0 else 7 * 24 * 60 * 60 * 1_000_000_000
+    ttl_ns = (
+        _IRIS_META_TTL_NS if _IRIS_META_TTL_NS > 0 else 7 * 24 * 60 * 60 * 1_000_000_000
+    )
     max_entries = _IRIS_META_MAX_ENTRIES if _IRIS_META_MAX_ENTRIES > 0 else 256
     return ttl_ns, max_entries
 
 
 def _normalize_flush_window() -> tuple[int, int]:
-    min_flush = _IRIS_META_FLUSH_MIN if _IRIS_META_FLUSH_MIN > 0 else _IRIS_META_FLUSH_EVERY
-    max_flush = _IRIS_META_FLUSH_MAX if _IRIS_META_FLUSH_MAX > 0 else max(min_flush, _IRIS_META_FLUSH_EVERY)
+    min_flush = (
+        _IRIS_META_FLUSH_MIN if _IRIS_META_FLUSH_MIN > 0 else _IRIS_META_FLUSH_EVERY
+    )
+    max_flush = (
+        _IRIS_META_FLUSH_MAX
+        if _IRIS_META_FLUSH_MAX > 0
+        else max(min_flush, _IRIS_META_FLUSH_EVERY)
+    )
     if max_flush < min_flush:
         max_flush = min_flush
     return min_flush, max_flush
@@ -195,7 +212,9 @@ def _normalize_profile_rows(rows: Any) -> list[list[Any]]:
     return out
 
 
-def _merge_profile_rows(existing_rows: Any, incoming_rows: list[list[Any]]) -> list[list[Any]]:
+def _merge_profile_rows(
+    existing_rows: Any, incoming_rows: list[list[Any]]
+) -> list[list[Any]]:
     merged: dict[int, list[Any]] = {}
     for row in _normalize_profile_rows(existing_rows):
         merged[int(row[0])] = row
@@ -245,7 +264,10 @@ def _pack_metadata_doc(doc: dict[str, Any]) -> bytes:
         return b""
     payload = _msgpack.packb(doc, use_bin_type=True)
     flags = 0
-    if _IRIS_META_COMPRESS_MIN_BYTES > 0 and len(payload) >= _IRIS_META_COMPRESS_MIN_BYTES:
+    if (
+        _IRIS_META_COMPRESS_MIN_BYTES > 0
+        and len(payload) >= _IRIS_META_COMPRESS_MIN_BYTES
+    ):
         payload = zlib.compress(payload)
         flags |= _IRIS_META_FLAG_COMPRESSED
     return _IRIS_META_MAGIC + bytes([flags]) + payload
@@ -369,7 +391,9 @@ def _seed_quantum_from_metadata(
         except Exception:
             continue
     if not normalized:
-        _jit_meta_log(f"seed miss: profile normalization empty key={key[:12]} path={path}")
+        _jit_meta_log(
+            f"seed miss: profile normalization empty key={key[:12]} path={path}"
+        )
         return False
     try:
         ok = bool(_seed_quantum_profile(func, normalized))
@@ -422,7 +446,11 @@ def _maybe_persist_quantum_metadata(
             if remainder != 0:
                 remaining = flush_interval - remainder
                 last_logged = _IRIS_META_LAST_DEFER_COUNTS.get(key, -1)
-                should_log = count == 1 or remaining == 1 or (count - last_logged) >= flush_interval
+                should_log = (
+                    count == 1
+                    or remaining == 1
+                    or (count - last_logged) >= flush_interval
+                )
                 if should_log:
                     _IRIS_META_LAST_DEFER_COUNTS[key] = count
                     _jit_meta_log(
@@ -444,7 +472,9 @@ def _maybe_persist_quantum_metadata(
         if not isinstance(row, (list, tuple)) or len(row) != 4:
             continue
         try:
-            normalized_rows.append([int(row[0]), float(row[1]), int(row[2]), int(row[3])])
+            normalized_rows.append(
+                [int(row[0]), float(row[1]), int(row[2]), int(row[3])]
+            )
         except Exception:
             continue
     if not normalized_rows:
@@ -502,7 +532,9 @@ def _maybe_persist_quantum_metadata(
             if prev_sig == row_sig:
                 _IRIS_META_FLUSH_INTERVALS[key] = min(max_flush, flush_interval * 2)
             else:
-                _IRIS_META_FLUSH_INTERVALS[key] = max(min_flush, flush_interval // 2 if flush_interval > 1 else 1)
+                _IRIS_META_FLUSH_INTERVALS[key] = max(
+                    min_flush, flush_interval // 2 if flush_interval > 1 else 1
+                )
             _IRIS_META_LAST_SIGNATURES[key] = row_sig
 
         entries[key] = {
@@ -558,7 +590,9 @@ def _flush_pending_quantum_metadata() -> None:
 atexit.register(_flush_pending_quantum_metadata)
 
 
-def set_jit_logging(enabled: Optional[bool] = None, env_var: Optional[str] = None) -> bool:
+def set_jit_logging(
+    enabled: Optional[bool] = None, env_var: Optional[str] = None
+) -> bool:
     """Configure low-level Rust JIT logging.
 
     Parameters
@@ -583,7 +617,9 @@ def get_jit_logging() -> bool:
     return bool(is_jit_logging_enabled())
 
 
-def set_quantum_speculation(enabled: Optional[bool] = None, env_var: Optional[str] = None) -> bool:
+def set_quantum_speculation(
+    enabled: Optional[bool] = None, env_var: Optional[str] = None
+) -> bool:
     """Configure quantum-style multi-version JIT speculation.
 
     Parameters
@@ -608,7 +644,9 @@ def get_quantum_speculation() -> bool:
     return bool(is_quantum_speculation_enabled())
 
 
-def set_quantum_speculation_threshold(threshold_ns: Optional[int] = None, env_var: Optional[str] = None) -> int:
+def set_quantum_speculation_threshold(
+    threshold_ns: Optional[int] = None, env_var: Optional[str] = None
+) -> int:
     """Configure how slow a function must be before quantum speculation kicks in.
 
     Parameters
@@ -632,7 +670,9 @@ def get_quantum_speculation_threshold() -> int:
     return int(_get_quantum_speculation_threshold())
 
 
-def set_quantum_log_threshold(threshold_ns: Optional[int] = None, env_var: Optional[str] = None) -> int:
+def set_quantum_log_threshold(
+    threshold_ns: Optional[int] = None, env_var: Optional[str] = None
+) -> int:
     """Configure how long a JIT quantum execution must run before emitting a log.
 
     Parameters
@@ -807,7 +847,9 @@ class _JitExprNormalizer(ast.NodeTransformer):
         if name in self.inline_cache:
             template = self.inline_cache[name]
         else:
-            template = _extract_inline_template_from_callable(target, self.fn_globals, self.inline_cache)
+            template = _extract_inline_template_from_callable(
+                target, self.fn_globals, self.inline_cache
+            )
             self.inline_cache[name] = template
 
         if template is None:
@@ -818,15 +860,17 @@ class _JitExprNormalizer(ast.NodeTransformer):
             return None
 
         inlined = copy.deepcopy(body_expr)
-        inlined = _JitExprNormalizer(self.fn_globals, self.inline_cache, self.active_inline | {name}).visit(inlined)
-        
+        inlined = _JitExprNormalizer(
+            self.fn_globals, self.inline_cache, self.active_inline | {name}
+        ).visit(inlined)
+
         for param, arg in reversed(list(zip(params, node.args))):
             inlined = ast.Call(
-                func=ast.Name(id='let_bind', ctx=ast.Load()),
+                func=ast.Name(id="let_bind", ctx=ast.Load()),
                 args=[ast.Name(id=param, ctx=ast.Load()), copy.deepcopy(arg), inlined],
-                keywords=[]
+                keywords=[],
             )
-            
+
         return ast.copy_location(inlined, node)
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
@@ -874,11 +918,17 @@ def _lower_to_expr(
     next_stmts = stmts[1:]
     normalizer = _JitExprNormalizer(fn_globals, inline_cache, active_inline)
 
-    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+    if (
+        isinstance(stmt, ast.Assign)
+        and len(stmt.targets) == 1
+        and isinstance(stmt.targets[0], ast.Name)
+    ):
         target = stmt.targets[0].id
         val = copy.deepcopy(stmt.value)
         val = normalizer.visit(val)
-        inner = _lower_to_expr(next_stmts, rest_expr, fn_globals, inline_cache, active_inline)
+        inner = _lower_to_expr(
+            next_stmts, rest_expr, fn_globals, inline_cache, active_inline
+        )
         if inner is None:
             return None
         return ast.Call(
@@ -887,11 +937,17 @@ def _lower_to_expr(
             keywords=[],
         )
 
-    if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.value is not None:
+    if (
+        isinstance(stmt, ast.AnnAssign)
+        and isinstance(stmt.target, ast.Name)
+        and stmt.value is not None
+    ):
         target = stmt.target.id
         val = copy.deepcopy(stmt.value)
         val = normalizer.visit(val)
-        inner = _lower_to_expr(next_stmts, rest_expr, fn_globals, inline_cache, active_inline)
+        inner = _lower_to_expr(
+            next_stmts, rest_expr, fn_globals, inline_cache, active_inline
+        )
         if inner is None:
             return None
         return ast.Call(
@@ -904,8 +960,14 @@ def _lower_to_expr(
         target = stmt.target.id
         right_val = copy.deepcopy(stmt.value)
         right_val = normalizer.visit(right_val)
-        new_val = ast.BinOp(left=ast.Name(id=target, ctx=ast.Load()), op=copy.deepcopy(stmt.op), right=right_val)
-        inner = _lower_to_expr(next_stmts, rest_expr, fn_globals, inline_cache, active_inline)
+        new_val = ast.BinOp(
+            left=ast.Name(id=target, ctx=ast.Load()),
+            op=copy.deepcopy(stmt.op),
+            right=right_val,
+        )
+        inner = _lower_to_expr(
+            next_stmts, rest_expr, fn_globals, inline_cache, active_inline
+        )
         if inner is None:
             return None
         return ast.Call(
@@ -917,9 +979,21 @@ def _lower_to_expr(
     if isinstance(stmt, ast.If):
         cond = copy.deepcopy(stmt.test)
         cond = normalizer.visit(cond)
-        then_expr = _lower_to_expr(list(stmt.body) + next_stmts, copy.deepcopy(rest_expr), fn_globals, inline_cache, active_inline)
+        then_expr = _lower_to_expr(
+            list(stmt.body) + next_stmts,
+            copy.deepcopy(rest_expr),
+            fn_globals,
+            inline_cache,
+            active_inline,
+        )
         orelse_stmts = list(stmt.orelse) + next_stmts if stmt.orelse else next_stmts
-        else_expr = _lower_to_expr(orelse_stmts, copy.deepcopy(rest_expr), fn_globals, inline_cache, active_inline)
+        else_expr = _lower_to_expr(
+            orelse_stmts,
+            copy.deepcopy(rest_expr),
+            fn_globals,
+            inline_cache,
+            active_inline,
+        )
         if then_expr is None or else_expr is None:
             return None
         return ast.IfExp(test=cond, body=then_expr, orelse=else_expr)
@@ -931,7 +1005,9 @@ def _lower_to_expr(
         return normalizer.visit(val)
 
     if isinstance(stmt, ast.Pass) or isinstance(stmt, ast.Expr):
-        return _lower_to_expr(next_stmts, rest_expr, fn_globals, inline_cache, active_inline)
+        return _lower_to_expr(
+            next_stmts, rest_expr, fn_globals, inline_cache, active_inline
+        )
 
     return None
 
@@ -942,15 +1018,23 @@ def _extract_return_expr_plan(
     inline_cache: Optional[dict[str, Optional[tuple[list[str], ast.AST]]]] = None,
 ) -> Optional[tuple[str, list[str]]]:
     stmts = _strip_docstring(list(fn_node.body))
-    if len(stmts) == 1 and isinstance(stmts[0], ast.Return) and stmts[0].value is not None:
-        return ast.unparse(_subst_expr(stmts[0].value, {}, fn_globals, inline_cache)), []
+    if (
+        len(stmts) == 1
+        and isinstance(stmts[0], ast.Return)
+        and stmts[0].value is not None
+    ):
+        return ast.unparse(
+            _subst_expr(stmts[0].value, {}, fn_globals, inline_cache)
+        ), []
     return None
 
 
 def _contains_unsupported_ast(node: ast.AST) -> bool:
     """Check if node contains constructs unsupported by JIT parser."""
     for child in ast.walk(node):
-        if isinstance(child, (ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)):
+        if isinstance(
+            child, (ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)
+        ):
             return True
     return False
 
@@ -972,7 +1056,9 @@ class _RuntimeLetBindTransformer(ast.NodeTransformer):
                 value=val_expr,
             )
             seq_expr = ast.Tuple(elts=[assign_expr, body_expr], ctx=ast.Load())
-            return ast.Subscript(value=seq_expr, slice=ast.Constant(value=1), ctx=ast.Load())
+            return ast.Subscript(
+                value=seq_expr, slice=ast.Constant(value=1), ctx=ast.Load()
+            )
         return node
 
 
@@ -1056,7 +1142,9 @@ def _extract_stateful_loop_plan(
     ):
         return None
     state_var = state_assign.targets[0].id
-    seed_src = ast.unparse(_subst_expr(state_assign.value, {}, fn_globals, inline_cache))
+    seed_src = ast.unparse(
+        _subst_expr(state_assign.value, {}, fn_globals, inline_cache)
+    )
 
     if not isinstance(loop_stmt, ast.For) or not isinstance(loop_stmt.target, ast.Name):
         return None
@@ -1362,7 +1450,9 @@ def _is_vector_like(value: Any) -> bool:
     return hasattr(value, "__len__") and hasattr(value, "__getitem__")
 
 
-def _vectorized_python_fallback(func: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+def _vectorized_python_fallback(
+    func: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> Any:
     vector_positions: list[int] = []
     vector_len: Optional[int] = None
     for idx, arg in enumerate(args):
@@ -1380,7 +1470,9 @@ def _vectorized_python_fallback(func: Callable[..., Any], args: tuple[Any, ...],
 
     out: list[Any] = []
     for i in range(vector_len):
-        iter_args = [arg[i] if idx in vector_positions else arg for idx, arg in enumerate(args)]
+        iter_args = [
+            arg[i] if idx in vector_positions else arg for idx, arg in enumerate(args)
+        ]
         out.append(func(*iter_args, **kwargs))
 
     try:
@@ -1389,7 +1481,9 @@ def _vectorized_python_fallback(func: Callable[..., Any], args: tuple[Any, ...],
         return out
 
 
-def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+def offload(
+    strategy: str = "actor", return_type: Optional[str] = None
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorator that marks a function for execution on the Iris JIT/actor pool.
 
     The decorated function is returned unchanged; the runtime keeps track of
@@ -1402,6 +1496,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
     ...     return a + b
 
     """
+
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         inline_cache: dict[str, Optional[tuple[list[str], ast.AST]]] = {}
         jit_eval_globals: dict[str, Any] = func.__globals__
@@ -1430,22 +1525,40 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
                 for node in tree.body:
                     if isinstance(node, ast.FunctionDef) and node.body:
-                        expr_plan = _extract_return_expr_plan(node, jit_eval_globals, inline_cache)
+                        expr_plan = _extract_return_expr_plan(
+                            node, jit_eval_globals, inline_cache
+                        )
                         if expr_plan is not None:
                             src, _ = expr_plan
                         else:
-                            inlined = _extract_inlined_expr_plan(node, jit_eval_globals, inline_cache)
+                            inlined = _extract_inlined_expr_plan(
+                                node, jit_eval_globals, inline_cache
+                            )
                             if inlined is not None:
                                 src = inlined
                             else:
                                 src = None
                                 if arg_names is not None:
-                                    loop_plan = _extract_stateful_loop_plan(node, arg_names, jit_eval_globals, inline_cache)
+                                    loop_plan = _extract_stateful_loop_plan(
+                                        node, arg_names, jit_eval_globals, inline_cache
+                                    )
                                     if loop_plan is None:
-                                        scalar_while_plan = _extract_scalar_while_plan(node, arg_names, jit_eval_globals, inline_cache)
+                                        scalar_while_plan = _extract_scalar_while_plan(
+                                            node,
+                                            arg_names,
+                                            jit_eval_globals,
+                                            inline_cache,
+                                        )
                                         if scalar_while_plan is None:
-                                            scalar_for_plan = _extract_scalar_for_plan(node, arg_names, jit_eval_globals, inline_cache)
-                                aggressive_src = _extract_last_return_expr(node, jit_eval_globals, inline_cache)
+                                            scalar_for_plan = _extract_scalar_for_plan(
+                                                node,
+                                                arg_names,
+                                                jit_eval_globals,
+                                                inline_cache,
+                                            )
+                                aggressive_src = _extract_last_return_expr(
+                                    node, jit_eval_globals, inline_cache
+                                )
                         break
             except Exception:
                 pass
@@ -1454,33 +1567,47 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
         preseeded_quantum = False
         if strategy == "jit":
-            preseeded_quantum = _seed_quantum_from_metadata(func, effective_src, arg_names, return_type)
+            preseeded_quantum = _seed_quantum_from_metadata(
+                func, effective_src, arg_names, return_type
+            )
 
         if register_offload is not None:
             try:
                 register_offload(func, strategy, return_type, effective_src, arg_names)
                 if strategy == "jit" and not preseeded_quantum:
-                    _seed_quantum_from_metadata(func, effective_src, arg_names, return_type)
+                    _seed_quantum_from_metadata(
+                        func, effective_src, arg_names, return_type
+                    )
             except Exception as e:  # pragma: no cover - defensive
                 warnings.warn(f"offload registration failed: {e}")
 
         # Wrap with runtime call depending on strategy
         if strategy == "actor" and offload_call is not None:
+
             @functools.wraps(func)
             def actor_wrapper(*args: Any, **kwargs: Any) -> Any:
                 return offload_call(func, args, kwargs)
+
             return actor_wrapper
-            
+
         elif strategy == "jit" and call_jit is not None:
-            if src is None and loop_plan is None and scalar_while_plan is None and scalar_for_plan is None:
+            if (
+                src is None
+                and loop_plan is None
+                and scalar_while_plan is None
+                and scalar_for_plan is None
+            ):
                 if aggressive_src is not None and arg_names is not None:
+
                     @functools.wraps(func)
                     def aggressive_vector_wrapper(*args: Any, **kwargs: Any) -> Any:
                         has_vector = any(_is_vector_like(a) for a in args)
                         if has_vector:
                             try:
                                 res = call_jit(func, args, kwargs)
-                                _maybe_persist_quantum_metadata(func, aggressive_src, arg_names, return_type)
+                                _maybe_persist_quantum_metadata(
+                                    func, aggressive_src, arg_names, return_type
+                                )
                                 return res
                             except RuntimeError as e:
                                 msg = str(e)
@@ -1490,7 +1617,9 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                                     or "jit panic" in msg
                                     or "wrong argument count" in msg
                                 ):
-                                    return _vectorized_python_fallback(func, args, kwargs)
+                                    return _vectorized_python_fallback(
+                                        func, args, kwargs
+                                    )
                                 raise
                         return func(*args, **kwargs)
 
@@ -1503,6 +1632,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                 return py_fallback_wrapper
 
             if src is not None:
+
                 @functools.wraps(func)
                 def jit_wrapper(*args: Any, **kwargs: Any) -> Any:
                     try:
@@ -1528,7 +1658,11 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                         reduction_mode = "all"
 
                     try:
-                        if reduction_mode is not None and hasattr(res, "__iter__") and not isinstance(res, (float, int)):
+                        if (
+                            reduction_mode is not None
+                            and hasattr(res, "__iter__")
+                            and not isinstance(res, (float, int))
+                        ):
                             if reduction_mode == "any":
                                 return 1.0 if any(float(v) != 0.0 for v in res) else 0.0
                             if reduction_mode == "all":
@@ -1544,7 +1678,11 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
                 return jit_wrapper
 
-            if loop_plan is not None and register_offload is not None and sig is not None:
+            if (
+                loop_plan is not None
+                and register_offload is not None
+                and sig is not None
+            ):
                 step_src = loop_plan["step_src"]
                 step_args = loop_plan["step_args"]
                 seed_src = loop_plan["seed_src"]
@@ -1555,7 +1693,11 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
                 def _iris_step(x: float, i: float) -> float:
                     namespace = {step_args[0]: x, step_args[1]: i}
-                    return float(_eval_runtime_expr(step_src, jit_eval_globals, namespace, step_code))
+                    return float(
+                        _eval_runtime_expr(
+                            step_src, jit_eval_globals, namespace, step_code
+                        )
+                    )
 
                 try:
                     register_offload(_iris_step, "jit", "float", step_src, step_args)
@@ -1574,7 +1716,11 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
                     local_seed_ns = dict(bound.arguments)
                     try:
-                        state = float(_eval_runtime_expr(seed_src, jit_eval_globals, local_seed_ns, seed_code))
+                        state = float(
+                            _eval_runtime_expr(
+                                seed_src, jit_eval_globals, local_seed_ns, seed_code
+                            )
+                        )
                         count = int(bound.arguments[count_arg])
                     except Exception:
                         return func(*args, **kwargs)
@@ -1594,8 +1740,16 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                                 or "failed to compile" in msg
                                 or "jit panic" in msg
                             ):
-                                local_ns = {step_args[0]: state, iter_var: i, step_args[1]: iter_val}
-                                state = float(_eval_runtime_expr(step_src, jit_eval_globals, local_ns, step_code))
+                                local_ns = {
+                                    step_args[0]: state,
+                                    iter_var: i,
+                                    step_args[1]: iter_val,
+                                }
+                                state = float(
+                                    _eval_runtime_expr(
+                                        step_src, jit_eval_globals, local_ns, step_code
+                                    )
+                                )
                             else:
                                 raise
                         out.append(state)
@@ -1603,7 +1757,11 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
                 return loop_jit_wrapper
 
-            if scalar_while_plan is not None and register_offload is not None and sig is not None:
+            if (
+                scalar_while_plan is not None
+                and register_offload is not None
+                and sig is not None
+            ):
                 step_src = scalar_while_plan["step_src"]
                 step_args = scalar_while_plan["step_args"]
                 count_arg = scalar_while_plan["count_arg"]
@@ -1614,7 +1772,11 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
                 def _iris_step(x: float, i: float) -> float:
                     namespace = {step_args[0]: x, step_args[1]: i}
-                    return float(_eval_runtime_expr(step_src, jit_eval_globals, namespace, step_code))
+                    return float(
+                        _eval_runtime_expr(
+                            step_src, jit_eval_globals, namespace, step_code
+                        )
+                    )
 
                 try:
                     register_offload(_iris_step, "jit", "float", step_src, step_args)
@@ -1636,7 +1798,11 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
                     local_seed_ns = dict(bound.arguments)
                     try:
-                        state = float(_eval_runtime_expr(seed_src, jit_eval_globals, local_seed_ns, seed_code))
+                        state = float(
+                            _eval_runtime_expr(
+                                seed_src, jit_eval_globals, local_seed_ns, seed_code
+                            )
+                        )
                         count = int(bound.arguments[count_arg])
                     except Exception:
                         return func(*args, **kwargs)
@@ -1646,7 +1812,9 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
                     if call_jit_step_loop_f64 is not None:
                         try:
-                            return float(call_jit_step_loop_f64(_iris_step, state, count))
+                            return float(
+                                call_jit_step_loop_f64(_iris_step, state, count)
+                            )
                         except RuntimeError as e:
                             msg = str(e)
                             if not (
@@ -1668,15 +1836,27 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                                 or "failed to compile" in msg
                                 or "jit panic" in msg
                             ):
-                                local_ns = {step_args[0]: state, iter_var: i, step_args[1]: iter_val}
-                                state = float(_eval_runtime_expr(step_src, jit_eval_globals, local_ns, step_code))
+                                local_ns = {
+                                    step_args[0]: state,
+                                    iter_var: i,
+                                    step_args[1]: iter_val,
+                                }
+                                state = float(
+                                    _eval_runtime_expr(
+                                        step_src, jit_eval_globals, local_ns, step_code
+                                    )
+                                )
                             else:
                                 raise
                     return state
 
                 return while_jit_wrapper
 
-            if scalar_for_plan is not None and register_offload is not None and sig is not None:
+            if (
+                scalar_for_plan is not None
+                and register_offload is not None
+                and sig is not None
+            ):
                 step_src = scalar_for_plan["step_src"]
                 step_args = scalar_for_plan["step_args"]
                 count_arg = scalar_for_plan["count_arg"]
@@ -1687,7 +1867,11 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
                 def _iris_step(x: float, i: float) -> float:
                     namespace = {step_args[0]: x, step_args[1]: i}
-                    return float(_eval_runtime_expr(step_src, jit_eval_globals, namespace, step_code))
+                    return float(
+                        _eval_runtime_expr(
+                            step_src, jit_eval_globals, namespace, step_code
+                        )
+                    )
 
                 try:
                     register_offload(_iris_step, "jit", "float", step_src, step_args)
@@ -1709,7 +1893,11 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
                     local_seed_ns = dict(bound.arguments)
                     try:
-                        state = float(_eval_runtime_expr(seed_src, jit_eval_globals, local_seed_ns, seed_code))
+                        state = float(
+                            _eval_runtime_expr(
+                                seed_src, jit_eval_globals, local_seed_ns, seed_code
+                            )
+                        )
                         count = int(bound.arguments[count_arg])
                     except Exception:
                         return func(*args, **kwargs)
@@ -1719,7 +1907,9 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
                     if call_jit_step_loop_f64 is not None:
                         try:
-                            return float(call_jit_step_loop_f64(_iris_step, state, count))
+                            return float(
+                                call_jit_step_loop_f64(_iris_step, state, count)
+                            )
                         except RuntimeError as e:
                             msg = str(e)
                             if not (
@@ -1741,8 +1931,16 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                                 or "failed to compile" in msg
                                 or "jit panic" in msg
                             ):
-                                local_ns = {step_args[0]: state, iter_var: i, step_args[1]: iter_val}
-                                state = float(_eval_runtime_expr(step_src, jit_eval_globals, local_ns, step_code))
+                                local_ns = {
+                                    step_args[0]: state,
+                                    iter_var: i,
+                                    step_args[1]: iter_val,
+                                }
+                                state = float(
+                                    _eval_runtime_expr(
+                                        step_src, jit_eval_globals, local_ns, step_code
+                                    )
+                                )
                             else:
                                 raise
                     return state
