@@ -9,19 +9,16 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// Execute a Python callback while safely catching Rust panics and
 /// Python exceptions. Returns `true` if the callback completed normally.
-pub(crate) fn run_python_callback_py<F>(py: Python, f: F) -> bool
-where
-    F: FnOnce(Python) -> PyResult<()>,
-{
+pub(crate) fn run_python_callback_py(
+    py: Python<'_>,
+    f: impl FnOnce(Python<'_>) -> PyResult<()>,
+) -> bool {
     let result = catch_unwind(AssertUnwindSafe(|| match f(py) {
         Ok(()) => Ok(()),
         Err(err) => {
             eprintln!("[Iris] Python actor exception: {}", err);
-            // PyErr::print() calls CPython's PyErr_Print, which terminates the process
-            // if the error is SystemExit. We must completely avoid it for SystemExit.
-            if !err.is_instance_of::<pyo3::exceptions::PySystemExit>(py) {
-                err.print(py);
-            }
+            // In modern PyO3, we use write_unraisable or similar to avoid SystemExit termination
+            err.write_unraisable(py, None);
             Err(())
         }
     }));
@@ -38,15 +35,12 @@ where
 
 /// Execute a Python callback while safely catching Rust panics and
 /// Python exceptions. Returns `true` if the callback completed normally.
-pub(crate) fn run_python_callback<F>(f: F) -> bool
-where
-    F: FnOnce(Python) -> PyResult<()>,
-{
-    Python::with_gil(|py| run_python_callback_py(py, f))
+pub(crate) fn run_python_callback(f: impl FnOnce(Python<'_>) -> PyResult<()>) -> bool {
+    Python::attach(|py| run_python_callback_py(py, f))
 }
 
 /// Python-friendly structured system message used during conversions.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct PySystemMessage {
     #[pyo3(get)]
@@ -59,25 +53,38 @@ pub struct PySystemMessage {
     pub metadata: Option<String>,
 }
 
-#[pyclass]
-#[derive(Clone)]
+#[pyclass(from_py_object)]
 pub struct PyRequest {
     #[pyo3(get)]
     pub reply_to: u64,
     #[pyo3(get)]
-    pub payload: Py<PyBytes>,
+    pub payload: Py<PyAny>,
+}
+
+impl Clone for PyRequest {
+    fn clone(&self) -> Self {
+        Python::attach(|py| Self {
+            reply_to: self.reply_to,
+            payload: self.payload.clone_ref(py),
+        })
+    }
 }
 
 /// Convert a Rust `Message` into a Python object suitable
 /// for passing back to the interpreter.
-pub(crate) fn message_to_py(py: Python, msg: mailbox::Message) -> PyObject {
+pub(crate) fn message_to_py(py: Python<'_>, msg: mailbox::Message) -> Py<PyAny> {
     match msg {
-        mailbox::Message::User(b) => PyBytes::new(py, &b).into_py(py),
-        mailbox::Message::Request { reply_to, payload } => PyRequest {
-            reply_to,
-            payload: PyBytes::new(py, &payload).into(),
+        mailbox::Message::User(b) => PyBytes::new(py, &b).into_any().unbind(),
+        mailbox::Message::Request { reply_to, payload } => {
+            let obj = PyRequest {
+                reply_to,
+                payload: PyBytes::new(py, &payload).unbind().into_any(),
+            };
+            Bound::new(py, obj)
+                .expect("Failed to create PyRequest")
+                .into_any()
+                .unbind()
         }
-        .into_py(py),
         mailbox::Message::System(mailbox::SystemMessage::Exit(info)) => {
             let reason = match info.reason {
                 mailbox::ExitReason::Normal => "normal".to_string(),
@@ -90,60 +97,91 @@ pub(crate) fn message_to_py(py: Python, msg: mailbox::Message) -> PyObject {
                 mailbox::ExitReason::Other(ref s) => s.clone(),
             };
 
-            PySystemMessage {
+            let obj = PySystemMessage {
                 type_name: "EXIT".to_string(),
                 target_pid: Some(info.from),
                 reason,
                 metadata: info.metadata.clone(),
-            }
-            .into_py(py)
+            };
+            Bound::new(py, obj)
+                .expect("Failed to create PySystemMessage")
+                .into_any()
+                .unbind()
         }
-        mailbox::Message::System(mailbox::SystemMessage::HotSwap(_)) => PySystemMessage {
-            type_name: "HOT_SWAP".to_string(),
-            target_pid: None,
-            reason: "".to_string(),
-            metadata: None,
+        mailbox::Message::System(mailbox::SystemMessage::HotSwap(_)) => {
+            let obj = PySystemMessage {
+                type_name: "HOT_SWAP".to_string(),
+                target_pid: None,
+                reason: "".to_string(),
+                metadata: None,
+            };
+            Bound::new(py, obj)
+                .expect("Failed to create PySystemMessage")
+                .into_any()
+                .unbind()
         }
-        .into_py(py),
-        mailbox::Message::System(mailbox::SystemMessage::Ping) => PySystemMessage {
-            type_name: "PING".to_string(),
-            target_pid: None,
-            reason: "".to_string(),
-            metadata: None,
+        mailbox::Message::System(mailbox::SystemMessage::Ping) => {
+            let obj = PySystemMessage {
+                type_name: "PING".to_string(),
+                target_pid: None,
+                reason: "".to_string(),
+                metadata: None,
+            };
+            Bound::new(py, obj)
+                .expect("Failed to create PySystemMessage")
+                .into_any()
+                .unbind()
         }
-        .into_py(py),
-        mailbox::Message::System(mailbox::SystemMessage::Pong) => PySystemMessage {
-            type_name: "PONG".to_string(),
-            target_pid: None,
-            reason: "".to_string(),
-            metadata: None,
+        mailbox::Message::System(mailbox::SystemMessage::Pong) => {
+            let obj = PySystemMessage {
+                type_name: "PONG".to_string(),
+                target_pid: None,
+                reason: "".to_string(),
+                metadata: None,
+            };
+            Bound::new(py, obj)
+                .expect("Failed to create PySystemMessage")
+                .into_any()
+                .unbind()
         }
-        .into_py(py),
-        mailbox::Message::System(mailbox::SystemMessage::Backpressure(level)) => PySystemMessage {
-            type_name: "BACKPRESSURE".to_string(),
-            target_pid: None,
-            reason: level.as_str().to_string(),
-            metadata: None,
+        mailbox::Message::System(mailbox::SystemMessage::Backpressure(level)) => {
+            let obj = PySystemMessage {
+                type_name: "BACKPRESSURE".to_string(),
+                target_pid: None,
+                reason: level.as_str().to_string(),
+                metadata: None,
+            };
+            Bound::new(py, obj)
+                .expect("Failed to create PySystemMessage")
+                .into_any()
+                .unbind()
         }
-        .into_py(py),
         mailbox::Message::System(mailbox::SystemMessage::DropOld) => py.None(),
     }
 }
 
 /// Run a Python matcher callback against a Rust message.
-pub(crate) fn run_python_matcher(py: Python, matcher: &PyObject, msg: &mailbox::Message) -> bool {
+pub(crate) fn run_python_matcher(
+    py: Python<'_>,
+    matcher: &Bound<'_, PyAny>,
+    msg: &mailbox::Message,
+) -> bool {
     match msg {
-        mailbox::Message::User(b) => match matcher.call1(py, (PyBytes::new(py, b),)) {
-            Ok(val) => val.extract::<bool>(py).unwrap_or(false),
-            Err(_) => false,
-        },
+        mailbox::Message::User(b) => {
+            let py_bytes = PyBytes::new(py, b);
+            match matcher.call1((py_bytes,)) {
+                Ok(val) => val.extract::<bool>().unwrap_or(false),
+                Err(_) => false,
+            }
+        }
         mailbox::Message::Request { reply_to, payload } => {
             let obj = PyRequest {
                 reply_to: *reply_to,
-                payload: PyBytes::new(py, payload).into(),
+                payload: PyBytes::new(py, payload).unbind().into_any(),
             };
-            match matcher.call1(py, (obj.into_py(py),)) {
-                Ok(val) => val.extract::<bool>(py).unwrap_or(false),
+            let py_obj = Bound::new(py, obj).expect("Failed to create PyRequest");
+            match matcher.call1((py_obj,)) {
+                Ok(val) => val.extract::<bool>().unwrap_or(false),
                 Err(_) => false,
             }
         }
@@ -166,8 +204,9 @@ pub(crate) fn run_python_matcher(py: Python, matcher: &PyObject, msg: &mailbox::
                     reason,
                     metadata: info.metadata.clone(),
                 };
-                match matcher.call1(py, (obj.into_py(py),)) {
-                    Ok(val) => val.extract::<bool>(py).unwrap_or(false),
+                let py_obj = Bound::new(py, obj).expect("Failed to create PySystemMessage");
+                match matcher.call1((py_obj,)) {
+                    Ok(val) => val.extract::<bool>().unwrap_or(false),
                     Err(_) => false,
                 }
             }
@@ -178,8 +217,9 @@ pub(crate) fn run_python_matcher(py: Python, matcher: &PyObject, msg: &mailbox::
                     reason: "".to_string(),
                     metadata: None,
                 };
-                match matcher.call1(py, (obj.into_py(py),)) {
-                    Ok(val) => val.extract::<bool>(py).unwrap_or(false),
+                let py_obj = Bound::new(py, obj).expect("Failed to create PySystemMessage");
+                match matcher.call1((py_obj,)) {
+                    Ok(val) => val.extract::<bool>().unwrap_or(false),
                     Err(_) => false,
                 }
             }
@@ -190,8 +230,9 @@ pub(crate) fn run_python_matcher(py: Python, matcher: &PyObject, msg: &mailbox::
                     reason: "".to_string(),
                     metadata: None,
                 };
-                match matcher.call1(py, (obj.into_py(py),)) {
-                    Ok(val) => val.extract::<bool>(py).unwrap_or(false),
+                let py_obj = Bound::new(py, obj).expect("Failed to create PySystemMessage");
+                match matcher.call1((py_obj,)) {
+                    Ok(val) => val.extract::<bool>().unwrap_or(false),
                     Err(_) => false,
                 }
             }
@@ -202,8 +243,9 @@ pub(crate) fn run_python_matcher(py: Python, matcher: &PyObject, msg: &mailbox::
                     reason: "".to_string(),
                     metadata: None,
                 };
-                match matcher.call1(py, (obj.into_py(py),)) {
-                    Ok(val) => val.extract::<bool>(py).unwrap_or(false),
+                let py_obj = Bound::new(py, obj).expect("Failed to create PySystemMessage");
+                match matcher.call1((py_obj,)) {
+                    Ok(val) => val.extract::<bool>().unwrap_or(false),
                     Err(_) => false,
                 }
             }
@@ -214,8 +256,9 @@ pub(crate) fn run_python_matcher(py: Python, matcher: &PyObject, msg: &mailbox::
                     reason: level.as_str().to_string(),
                     metadata: None,
                 };
-                match matcher.call1(py, (obj.into_py(py),)) {
-                    Ok(val) => val.extract::<bool>(py).unwrap_or(false),
+                let py_obj = Bound::new(py, obj).expect("Failed to create PySystemMessage");
+                match matcher.call1((py_obj,)) {
+                    Ok(val) => val.extract::<bool>().unwrap_or(false),
                     Err(_) => false,
                 }
             }

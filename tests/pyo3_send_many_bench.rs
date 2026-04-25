@@ -1,113 +1,80 @@
-#![cfg(feature = "pyo3")]
-
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 #[test]
 fn bench_send_vs_send_many() {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let module = iris::py::make_module(py).expect("make_module");
-        let rt = module
-            .as_ref(py)
-            .getattr("PyRuntime")
-            .expect("PyRuntime missing")
-            .call0()
-            .expect("construct PyRuntime failed");
+        let rt = module.getattr("PyRuntime").unwrap().call0().unwrap();
 
         let locals = PyDict::new(py);
-        locals.set_item("rt", rt).unwrap();
-        locals
-            .set_item("__builtins__", py.import("builtins").unwrap())
-            .unwrap();
+        locals.set_item("rt", &rt).unwrap();
 
         py.run(
-            r#"
+            pyo3::ffi::c_str!(
+                r#"
 import statistics
 import time
 
-TOTAL_MESSAGES = 100_000
-BATCH_SIZE = 256
-ROUNDS = 5
-PAYLOAD = b"ping"
-MAX_BENCH_SECONDS = 25.0
-MISSING_PID = (1 << 63) - 1
+def bench_send(rt, count=1000):
+    def empty_handler(msg):
+        pass
+    
+    pid = rt.spawn(empty_handler)
+    msg = b"hello"
+    
+    start = time.perf_counter_ns()
+    for _ in range(count):
+        rt.send(pid, msg)
+    end = time.perf_counter_ns()
+    
+    rt.stop(pid)
+    return (end - start) / count
 
-
-def run_send():
-    t0 = time.perf_counter()
-    for _ in range(TOTAL_MESSAGES):
-        # Missing PID isolates Python->Rust API dispatch overhead and avoids
-        # queue drain time from dominating benchmark runtime.
-        _ = rt.send(MISSING_PID, PAYLOAD)
-    return time.perf_counter() - t0
-
-
-def run_send_many():
-    full = TOTAL_MESSAGES // BATCH_SIZE
-    rem = TOTAL_MESSAGES % BATCH_SIZE
-    batch = [PAYLOAD] * BATCH_SIZE
-
-    t0 = time.perf_counter()
-    for _ in range(full):
-        _ = rt.send_many(MISSING_PID, batch)
-    if rem:
-        _ = rt.send_many(MISSING_PID, [PAYLOAD] * rem)
-    return time.perf_counter() - t0
-
+def bench_send_many(rt, count=1000):
+    def empty_handler(msg):
+        pass
+    
+    pid = rt.spawn(empty_handler)
+    msg = b"hello"
+    batch = [msg] * count
+    
+    start = time.perf_counter_ns()
+    rt.send_many(pid, batch)
+    end = time.perf_counter_ns()
+    
+    rt.stop(pid)
+    return (end - start) / count
 
 # Warmup
-run_send()
-run_send_many()
+bench_send(rt, 100)
+bench_send_many(rt, 100)
 
-send_times = []
-send_many_times = []
-bench_start = time.perf_counter()
-for _ in range(ROUNDS):
-    if time.perf_counter() - bench_start > MAX_BENCH_SECONDS:
-        break
-    send_times.append(run_send())
-    send_many_times.append(run_send_many())
+# Real bench
+times_single = [bench_send(rt, 1000) for _ in range(5)]
+times_many = [bench_send_many(rt, 1000) for _ in range(5)]
 
-if not send_times or not send_many_times:
-    raise RuntimeError("benchmark did not complete any rounds")
+avg_single = statistics.mean(times_single)
+avg_many = statistics.mean(times_many)
+speedup = avg_single / avg_many
 
-send_med = statistics.median(send_times)
-many_med = statistics.median(send_many_times)
-speedup = send_med / many_med if many_med > 0 else float("inf")
+print(f"\n[Bench] Average send: {avg_single:.2f}ns")
+print(f"[Bench] Average send_many (amortized): {avg_many:.2f}ns")
+print(f"[Bench] Speedup: {speedup:.2f}x")
 
-print("[bench] send median:      %.6fs (%.0f msg/s)" % (send_med, TOTAL_MESSAGES / send_med))
-print("[bench] send_many median: %.6fs (%.0f msg/s)" % (many_med, TOTAL_MESSAGES / many_med))
-print("[bench] speedup: %.2fx" % speedup)
+# We expect at least some speedup due to reduced GIL acquisitions and overhead
+# in the high-frequency send_many path.
+assert speedup > 1.0, f"send_many was not faster (speedup={speedup:.2f}x)"
 
-bench_send_med = send_med
-bench_many_med = many_med
 bench_speedup = speedup
-"#,
-            Some(locals),
-            Some(locals),
+"#
+            ),
+            None,
+            Some(&locals),
         )
-        .expect("python benchmark run failed");
+        .unwrap();
 
-        let send_med: f64 = locals
-            .get_item("bench_send_med")
-            .unwrap()
-            .unwrap()
-            .extract()
-            .unwrap();
-        let many_med: f64 = locals
-            .get_item("bench_many_med")
-            .unwrap()
-            .unwrap()
-            .extract()
-            .unwrap();
-        let speedup: f64 = locals
-            .get_item("bench_speedup")
-            .unwrap()
-            .unwrap()
-            .extract()
-            .unwrap();
-        assert!(send_med.is_finite() && send_med > 0.0);
-        assert!(many_med.is_finite() && many_med > 0.0);
-        assert!(speedup.is_finite() && speedup > 0.0);
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 }

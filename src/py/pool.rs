@@ -13,19 +13,18 @@ use crate::Runtime;
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use pyo3::PyObject;
 
 /// Task variants sent to dedicated or pooled GIL workers.
 #[cfg(feature = "pyo3")]
 pub(crate) enum PoolTask {
     Execute {
-        behavior: Arc<parking_lot::RwLock<PyObject>>,
+        behavior: Arc<parking_lot::RwLock<Py<PyAny>>>,
         bytes: bytes::Bytes,
         pid_holder: Arc<AtomicU64>,
         rt: Arc<Runtime>,
     },
     HotSwap {
-        behavior: Arc<parking_lot::RwLock<PyObject>>,
+        behavior: Arc<parking_lot::RwLock<Py<PyAny>>>,
         ptr: usize,
     },
 }
@@ -68,7 +67,7 @@ impl GilPool {
                             }
                             let success = crate::py::utils::run_python_callback(|py| {
                                 let guard = behavior.read();
-                                let cb = guard.as_ref(py);
+                                let cb = guard.bind(py);
                                 let pybytes = PyBytes::new(py, &bytes);
                                 cb.call1((pybytes,)).map(|_| ())
                             });
@@ -83,11 +82,14 @@ impl GilPool {
                             if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
                                 break;
                             }
-                            Python::with_gil(|py| unsafe {
+                            Python::attach(|py| unsafe {
                                 let new_obj =
-                                    PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject);
+                                    Bound::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject)
+                                        .unbind();
                                 *behavior.write() = new_obj;
-                            });
+                                Ok::<(), PyErr>(())
+                            })
+                            .unwrap();
                         }
                     },
                     Err(cb_channel::RecvTimeoutError::Timeout) => continue,
@@ -107,7 +109,7 @@ impl GilPool {
 pub(crate) fn make_release_gil_channel(
     rt: &Runtime,
     release: bool,
-    behavior: Arc<parking_lot::RwLock<PyObject>>,
+    behavior: Arc<parking_lot::RwLock<Py<PyAny>>>,
     pid_holder: Arc<AtomicU64>,
     rt_arc: Arc<Runtime>,
 ) -> PyResult<Option<cb_channel::Sender<DedicatedPoolTask>>> {
@@ -160,7 +162,7 @@ pub(crate) fn make_release_gil_channel(
                     }
                     let success = crate::py::utils::run_python_callback(|py| {
                         let guard = _b_thread.read();
-                        let cb = guard.as_ref(py);
+                        let cb = guard.bind(py);
                         let pybytes = PyBytes::new(py, &bytes);
                         cb.call1((pybytes,)).map(|_| ())
                     });
@@ -175,10 +177,13 @@ pub(crate) fn make_release_gil_channel(
                     if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
                         continue;
                     }
-                    Python::with_gil(|py| unsafe {
-                        let new_obj = PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject);
+                    Python::attach(|py| unsafe {
+                        let new_obj =
+                            Bound::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject).unbind();
                         *_b_thread.write() = new_obj;
-                    });
+                        Ok::<(), PyErr>(())
+                    })
+                    .unwrap();
                 }
             },
             Err(cb_channel::RecvTimeoutError::Timeout) => continue,
@@ -197,14 +202,12 @@ mod tests {
 
     #[test]
     fn max_threads_zero_forces_shared_pool_even_in_strict_mode() {
-        pyo3::prepare_freethreaded_python();
-
         let rt = Runtime::new();
         rt.set_release_gil_limits(0, 1);
         rt.set_release_gil_strict(true);
 
-        pyo3::Python::with_gil(|py| {
-            let behavior = Arc::new(parking_lot::RwLock::new(py.None().into_py(py)));
+        Python::attach(|py| {
+            let behavior = Arc::new(parking_lot::RwLock::new(py.None()));
             let ch = make_release_gil_channel(
                 &rt,
                 true,
@@ -214,6 +217,8 @@ mod tests {
             )
             .expect("max_threads=0 should force shared pool mode without strict error");
             assert!(ch.is_none());
-        });
+            Ok::<(), PyErr>(())
+        })
+        .unwrap();
     }
 }

@@ -13,34 +13,34 @@ use pyo3::wrap_pyfunction;
 #[cfg(feature = "pyo3")]
 #[pyfunction]
 fn register_offload(
-    func: PyObject,
+    func: Py<PyAny>,
     _strategy: Option<String>,
     _return_type: Option<String>,
     _source_expr: Option<String>,
     _arg_names: Option<Vec<String>>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     Ok(func)
 }
 
 #[cfg(feature = "pyo3")]
 #[pyfunction]
 fn offload_call(
-    py: Python,
-    func: PyObject,
-    args: &PyTuple,
-    kwargs: Option<&PyDict>,
-) -> PyResult<PyObject> {
-    func.as_ref(py).call(args, kwargs).map(|v| v.into_py(py))
+    py: Python<'_>,
+    func: Py<PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    func.bind(py).call(args, kwargs).map(|v| v.unbind())
 }
 
 #[cfg(feature = "pyo3")]
 #[pyfunction]
 fn call_jit(
-    _py: Python,
-    _func: PyObject,
-    _args: &PyTuple,
-    _kwargs: Option<&PyDict>,
-) -> PyResult<PyObject> {
+    _py: Python<'_>,
+    _func: Py<PyAny>,
+    _args: &Bound<'_, PyTuple>,
+    _kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     Err(pyo3::exceptions::PyRuntimeError::new_err(
         "JIT feature is disabled in this build",
     ))
@@ -48,7 +48,7 @@ fn call_jit(
 
 #[cfg(feature = "pyo3")]
 #[pyfunction]
-fn call_jit_step_loop_f64(_func: PyObject, _seed: f64, _count: usize) -> PyResult<f64> {
+fn call_jit_step_loop_f64(_func: Py<PyAny>, _seed: f64, _count: usize) -> PyResult<f64> {
     Err(pyo3::exceptions::PyRuntimeError::new_err(
         "JIT feature is disabled in this build",
     ))
@@ -83,13 +83,13 @@ fn is_quantum_speculation_enabled() -> PyResult<bool> {
 
 #[cfg(feature = "pyo3")]
 #[pyfunction]
-fn get_quantum_profile(_func: PyObject) -> PyResult<Vec<(usize, f64, u64, u64)>> {
+fn get_quantum_profile(_func: Py<PyAny>) -> PyResult<Vec<(usize, f64, u64, u64)>> {
     Ok(Vec::new())
 }
 
 #[cfg(feature = "pyo3")]
 #[pyfunction]
-fn seed_quantum_profile(_func: PyObject, _rows: Vec<(usize, f64, u64, u64)>) -> PyResult<bool> {
+fn seed_quantum_profile(_func: Py<PyAny>, _rows: Vec<(usize, f64, u64, u64)>) -> PyResult<bool> {
     Ok(false)
 }
 
@@ -158,7 +158,7 @@ fn get_quantum_cooldown() -> PyResult<(u64, u64)> {
 }
 
 #[cfg(feature = "pyo3")]
-pub(crate) fn init_py(m: &PyModule) -> PyResult<()> {
+pub(crate) fn init_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(register_offload, m)?)?;
     m.add_function(wrap_pyfunction!(offload_call, m)?)?;
     m.add_function(wrap_pyfunction!(call_jit, m)?)?;

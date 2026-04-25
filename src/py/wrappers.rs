@@ -6,6 +6,7 @@ use crate::buffer::{global_registry, BufferId};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use pyo3::wrap_pyfunction;
+use pyo3::IntoPyObjectExt;
 use std::os::raw::{c_char, c_void};
 
 use super::runtime::PyRuntime;
@@ -31,7 +32,7 @@ fn version() -> &'static str {
 }
 
 #[pyfunction]
-fn allocate_buffer(py: Python, size: usize) -> PyResult<PyObject> {
+fn allocate_buffer(py: Python<'_>, size: usize) -> PyResult<Py<PyAny>> {
     let id = global_registry().allocate(size);
     let (ptr, len) = global_registry()
         .ptr_len(id)
@@ -64,10 +65,12 @@ fn allocate_buffer(py: Python, size: usize) -> PyResult<PyObject> {
             ));
         }
 
-        let memobj = PyObject::from_owned_ptr(py, mv);
-        let idobj = id.into_py(py);
-        let capobj = PyObject::from_owned_ptr(py, capsule);
-        Ok(PyTuple::new(py, &[idobj, memobj, capobj]).into())
+        let memobj = Bound::from_owned_ptr(py, mv).into_any();
+        let idobj = id.into_py_any(py)?;
+        let capobj = Bound::from_owned_ptr(py, capsule).into_any();
+        Ok(PyTuple::new(py, [idobj, memobj.unbind(), capobj.unbind()])?
+            .unbind()
+            .into_any())
     }
 }
 
@@ -134,7 +137,7 @@ fn path_supervisor_children(rt: PyRef<PyRuntime>, path: String) -> PyResult<Vec<
 }
 
 #[cfg(feature = "pyo3")]
-fn populate_module(m: &PyModule) -> PyResult<()> {
+fn populate_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::logging::init_logger();
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_class::<PyRuntime>()?;
@@ -167,15 +170,15 @@ fn populate_module(m: &PyModule) -> PyResult<()> {
 
 #[cfg(feature = "pyo3")]
 #[pymodule]
-fn iris(_py: Python, m: &PyModule) -> PyResult<()> {
+fn iris(m: &Bound<'_, PyModule>) -> PyResult<()> {
     populate_module(m)
 }
 
 #[cfg(feature = "pyo3")]
-pub fn make_module(py: Python) -> PyResult<Py<PyModule>> {
+pub fn make_module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     let m = PyModule::new(py, "iris")?;
-    populate_module(m)?;
-    Ok(m.into())
+    populate_module(&m)?;
+    Ok(m)
 }
 
 #[cfg(feature = "pyo3")]

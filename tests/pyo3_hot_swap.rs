@@ -8,13 +8,10 @@ use std::time::Duration;
 #[tokio::test]
 async fn test_hot_swap_flow() {
     // 1. Setup: Create Runtime and shared results list
-    let (rt, pid, results, handler_b): (PyObject, u64, PyObject, PyObject) =
-        Python::with_gil(|py| {
+    let (rt, pid, results, handler_b): (Py<PyAny>, u64, Py<PyAny>, Py<PyAny>) =
+        Python::attach(|py| {
             let module = iris::py::make_module(py).expect("make_module");
-            let runtime_type = module
-                .as_ref(py)
-                .getattr("PyRuntime")
-                .expect("no PyRuntime type");
+            let runtime_type = module.getattr("PyRuntime").expect("no PyRuntime type");
             let rt = runtime_type.call0().expect("construct PyRuntime");
 
             // A shared list to capture output from the actor
@@ -22,26 +19,28 @@ async fn test_hot_swap_flow() {
 
             // Define two different behaviors in the Python environment
             let locals = PyDict::new(py);
-            locals.set_item("results", results).unwrap();
+            locals.set_item("results", &results).unwrap();
 
             // [FIX] We bind 'results=results' in the function definition.
             // This ensures the function object captures the specific 'results' list
             // at definition time, preventing NameErrors when running in background threads.
             py.run(
-                r#"
+                pyo3::ffi::c_str!(
+                    r#"
 def handler_a(msg, results=results):
     results.append(f"A:{msg.decode()}")
 
 def handler_b(msg, results=results):
     results.append(f"B:{msg.decode()}")
-"#,
+"#
+                ),
                 None,
-                Some(locals),
+                Some(&locals),
             )
             .unwrap();
 
-            let handler_a = locals.get_item("handler_a").unwrap();
-            let handler_b = locals.get_item("handler_b").unwrap();
+            let handler_a = locals.get_item("handler_a").unwrap().unwrap();
+            let handler_b = locals.get_item("handler_b").unwrap().unwrap();
 
             // Spawn the actor with Behavior A
             let pid: u64 = rt
@@ -50,49 +49,58 @@ def handler_b(msg, results=results):
                 .extract()
                 .unwrap();
 
-            (
-                rt.into_py(py),
+            Ok::<(Py<PyAny>, u64, Py<PyAny>, Py<PyAny>), PyErr>((
+                rt.unbind(),
                 pid,
-                results.into_py(py),
-                handler_b.into_py(py),
-            )
-        });
+                results.unbind().into(),
+                handler_b.unbind(),
+            ))
+        })
+        .unwrap();
 
     // 2. Execution: Send message to Behavior A
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let msg = pyo3::types::PyBytes::new(py, b"1");
-        rt.call_method1(py, "send", (pid, msg)).unwrap();
-    });
+        rt.bind(py).call_method1("send", (pid, msg)).unwrap();
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 
     // Allow async processing (Behavior A runs)
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // sanity check: ensure the first message was handled by A before swapping
-    Python::with_gil(|py| {
-        let res: Vec<String> = results.extract(py).unwrap();
+    Python::attach(|py| {
+        let res: Vec<String> = results.bind(py).extract().unwrap();
         assert!(
             res.first().map(|s| s == "A:1").unwrap_or(false),
             "first message was not processed by A before hot swap: {:?}",
             res
         );
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 
     // 3. The Twist: Hot Swap to Behavior B
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         // Call the hot_swap API
-        rt.call_method1(py, "hot_swap", (pid, &handler_b)).unwrap();
+        rt.bind(py)
+            .call_method1("hot_swap", (pid, &handler_b))
+            .unwrap();
 
         // Send message to the *same* PID, which should now use Behavior B
         let msg = pyo3::types::PyBytes::new(py, b"2");
-        rt.call_method1(py, "send", (pid, msg)).unwrap();
-    });
+        rt.bind(py).call_method1("send", (pid, msg)).unwrap();
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 
     // Allow async processing (Hot Swap + Behavior B runs)
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // 4. Verification: Check the timeline of events
-    Python::with_gil(|py| {
-        let res: Vec<String> = results.extract(py).unwrap();
+    Python::attach(|py| {
+        let res: Vec<String> = results.bind(py).extract().unwrap();
 
         // We expect [ "A:1", "B:2" ]
         assert_eq!(res.len(), 2, "Expected 2 messages, got {:?}", res);
@@ -100,8 +108,10 @@ def handler_b(msg, results=results):
         assert_eq!(res[1], "B:2");
 
         // Clean up
-        rt.call_method1(py, "stop", (pid,)).unwrap();
-    });
+        rt.bind(py).call_method1("stop", (pid,)).unwrap();
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 
     // Final wait for stop
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -109,20 +119,23 @@ def handler_b(msg, results=results):
 
 #[tokio::test]
 async fn test_behavior_versioning_and_rollback() {
-    let (rt, pid, results, handler_b, handler_c): (PyObject, u64, PyObject, PyObject, PyObject) =
-        Python::with_gil(|py| {
-            let module = iris::py::make_module(py).expect("make_module");
-            let runtime_type = module
-                .as_ref(py)
-                .getattr("PyRuntime")
-                .expect("no PyRuntime type");
-            let rt = runtime_type.call0().expect("construct PyRuntime");
+    let (rt, pid, results, handler_b, handler_c): (
+        Py<PyAny>,
+        u64,
+        Py<PyAny>,
+        Py<PyAny>,
+        Py<PyAny>,
+    ) = Python::attach(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module.getattr("PyRuntime").expect("no PyRuntime type");
+        let rt = runtime_type.call0().expect("construct PyRuntime");
 
-            let results = PyList::empty(py);
-            let locals = PyDict::new(py);
-            locals.set_item("results", results).unwrap();
+        let results = PyList::empty(py);
+        let locals = PyDict::new(py);
+        locals.set_item("results", &results).unwrap();
 
-            py.run(
+        py.run(
+            pyo3::ffi::c_str!(
                 r#"
 def handler_a(msg, results=results):
     results.append(f"A:{msg.decode()}")
@@ -132,69 +145,85 @@ def handler_b(msg, results=results):
 
 def handler_c(msg, results=results):
     results.append(f"C:{msg.decode()}")
-"#,
-                None,
-                Some(locals),
-            )
+"#
+            ),
+            None,
+            Some(&locals),
+        )
+        .unwrap();
+
+        let handler_a = locals.get_item("handler_a").unwrap().unwrap();
+        let handler_b = locals.get_item("handler_b").unwrap().unwrap();
+        let handler_c = locals.get_item("handler_c").unwrap().unwrap();
+
+        let pid: u64 = rt
+            .call_method1("spawn_py_handler", (handler_a, 10usize))
+            .unwrap()
+            .extract()
             .unwrap();
 
-            let handler_a = locals.get_item("handler_a").unwrap();
-            let handler_b = locals.get_item("handler_b").unwrap();
-            let handler_c = locals.get_item("handler_c").unwrap();
+        Ok::<(Py<PyAny>, u64, Py<PyAny>, Py<PyAny>, Py<PyAny>), PyErr>((
+            rt.unbind(),
+            pid,
+            results.unbind().into(),
+            handler_b.unbind(),
+            handler_c.unbind(),
+        ))
+    })
+    .unwrap();
 
-            let pid: u64 = rt
-                .call_method1("spawn_py_handler", (handler_a, 10usize))
-                .unwrap()
-                .extract()
-                .unwrap();
-
-            (
-                rt.into_py(py),
-                pid,
-                results.into_py(py),
-                handler_b.into_py(py),
-                handler_c.into_py(py),
-            )
-        });
-
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let ver: u64 = rt
-            .call_method1(py, "behavior_version", (pid,))
+            .bind(py)
+            .call_method1("behavior_version", (pid,))
             .unwrap()
-            .extract(py)
+            .extract()
             .unwrap();
         assert_eq!(ver, 1);
 
-        rt.call_method1(py, "hot_swap", (pid, &handler_b)).unwrap();
-        rt.call_method1(py, "hot_swap", (pid, &handler_c)).unwrap();
+        rt.bind(py)
+            .call_method1("hot_swap", (pid, &handler_b))
+            .unwrap();
+        rt.bind(py)
+            .call_method1("hot_swap", (pid, &handler_c))
+            .unwrap();
 
         let ver_after: u64 = rt
-            .call_method1(py, "behavior_version", (pid,))
+            .bind(py)
+            .call_method1("behavior_version", (pid,))
             .unwrap()
-            .extract(py)
+            .extract()
             .unwrap();
         assert_eq!(ver_after, 3);
 
         let rolled: u64 = rt
-            .call_method1(py, "rollback_behavior", (pid, 1usize))
+            .bind(py)
+            .call_method1("rollback_behavior", (pid, 1usize))
             .unwrap()
-            .extract(py)
+            .extract()
             .unwrap();
         assert_eq!(rolled, 2);
 
         let msg = pyo3::types::PyBytes::new(py, b"x");
-        rt.call_method1(py, "send", (pid, msg)).unwrap();
-    });
+        rt.bind(py).call_method1("send", (pid, msg)).unwrap();
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 
     tokio::time::sleep(Duration::from_millis(60)).await;
 
-    Python::with_gil(|py| {
-        let res: Vec<String> = results.extract(py).unwrap();
+    Python::attach(|py| {
+        let res: Vec<String> = results.bind(py).extract().unwrap();
         assert!(
             res.iter().any(|s| s == "B:x"),
             "rollback should reactivate B behavior: {:?}",
             res
         );
-        rt.call_method1(py, "stop", (pid,)).unwrap();
-    });
+        rt.bind(py).call_method1("stop", (pid,)).unwrap();
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
+
+    // Final wait for stop
+    tokio::time::sleep(Duration::from_millis(10)).await;
 }

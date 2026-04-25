@@ -126,7 +126,8 @@ impl Runtime {
 
         #[cfg(feature = "pyo3")]
         {
-            pyo3::prepare_freethreaded_python();
+            // In modern PyO3, this is often handled by auto-initialize or not needed for library usage.
+            // pyo3::prepare_freethreaded_python();
         }
 
         let (telemetry_mgr, _event_rx) = telemetry::TelemetryManager::new();

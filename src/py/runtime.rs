@@ -6,7 +6,7 @@ use bytes;
 use pyo3::prelude::*;
 use pyo3::types::PyByteArray;
 use pyo3::types::PyBytes;
-use pyo3_asyncio::tokio::future_into_py;
+use pyo3_async_runtimes::tokio::future_into_py;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,12 +42,12 @@ pub struct PyRuntime {
     pub(crate) inner: std::sync::Arc<Runtime>,
 }
 
-fn py_any_to_bytes(data: &PyAny) -> PyResult<bytes::Bytes> {
-    if let Ok(py_bytes) = data.downcast::<PyBytes>() {
+fn py_any_to_bytes(data: &Bound<'_, PyAny>) -> PyResult<bytes::Bytes> {
+    if let Ok(py_bytes) = data.cast::<PyBytes>() {
         return Ok(bytes::Bytes::copy_from_slice(py_bytes.as_bytes()));
     }
 
-    if let Ok(py_bytearray) = data.downcast::<PyByteArray>() {
+    if let Ok(py_bytearray) = data.cast::<PyByteArray>() {
         let raw = unsafe { py_bytearray.as_bytes() };
         return Ok(bytes::Bytes::copy_from_slice(raw));
     }
@@ -153,7 +153,7 @@ impl PyRuntime {
     /// Detects if an active runtime exists. If so, uses block_in_place to avoid panics.
     fn resolve_remote(&self, py: Python, addr: String, name: String) -> PyResult<Option<u64>> {
         let rt = self.inner.clone();
-        py.allow_threads(|| {
+        py.detach(|| {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 Ok(tokio::task::block_in_place(|| {
                     handle.block_on(rt.resolve_remote_async(addr, name))
@@ -171,7 +171,7 @@ impl PyRuntime {
         py: Python<'py>,
         addr: String,
         name: String,
-    ) -> PyResult<&'py PyAny> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let rt = self.inner.clone();
         future_into_py(py, async move {
             let pid = rt.resolve_remote_async(addr, name).await;
@@ -195,6 +195,7 @@ impl PyRuntime {
     ///
     /// ``policy`` should be one of: "dropnew", "dropold", "block", "redirect", "spill".
     /// ``target`` is only used for redirect/spill: the PID to forward to.
+    #[pyo3(signature = (pid, policy, target=None))]
     fn set_overflow_policy(&self, pid: u64, policy: String, target: Option<u64>) -> PyResult<()> {
         let pol = match policy.to_lowercase().as_str() {
             "dropnew" => OverflowPolicy::DropNew,
@@ -347,10 +348,16 @@ impl PyRuntime {
     }
 
     /// Phase 5: Send a binary payload to a PID on a remote node.
-    fn send_remote(&self, py: Python, addr: String, pid: u64, data: &PyAny) -> PyResult<()> {
-        let bytes = py_any_to_bytes(data)?;
+    fn send_remote(
+        &self,
+        py: Python,
+        addr: String,
+        pid: u64,
+        data: Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let bytes = py_any_to_bytes(&data)?;
         let rt = self.inner.clone();
-        py.allow_threads(move || {
+        py.detach(move || {
             rt.send_remote(addr, pid, bytes);
         });
         Ok(())
@@ -367,7 +374,7 @@ impl PyRuntime {
     fn is_node_up(&self, py: Python, addr: String) -> PyResult<bool> {
         let fut = async { tokio::net::TcpStream::connect(&addr).await.is_ok() };
 
-        py.allow_threads(|| {
+        py.detach(|| {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 // Must use block_in_place to prevent "runtime within runtime" panic
                 Ok(tokio::task::block_in_place(|| handle.block_on(fut)))
@@ -382,7 +389,7 @@ impl PyRuntime {
             // Allows Python signal handlers to jump in and kill hanging processes
             py.check_signals()?;
 
-            let is_alive = py.allow_threads(|| {
+            let is_alive = py.detach(|| {
                 let alive = self.inner.is_alive(pid);
                 if alive {
                     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -402,7 +409,7 @@ impl PyRuntime {
         Ok(())
     }
 
-    fn hot_swap(&self, pid: u64, new_handler: PyObject) -> PyResult<()> {
+    fn hot_swap(&self, pid: u64, new_handler: Py<PyAny>) -> PyResult<()> {
         let ptr = new_handler.into_ptr();
         self.inner.hot_swap(pid, ptr as usize);
         Ok(())
@@ -437,33 +444,51 @@ impl PyRuntime {
     }
 
     /// Send a request and await a response (async).
+    #[pyo3(signature = (pid, data, timeout=None))]
     fn call<'py>(
         &self,
         py: Python<'py>,
         pid: u64,
-        data: &PyAny,
+        data: Bound<'py, PyAny>,
         timeout: Option<f64>,
-    ) -> PyResult<&'py PyAny> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let rt = self.inner.clone();
-        let payload = py_any_to_bytes(data)?;
+        let payload = py_any_to_bytes(&data)?;
         let to = timeout.unwrap_or(5.0);
         let duration = Duration::from_secs_f64(to);
 
-        future_into_py::<_, PyObject>(py, async move {
+        future_into_py(py, async move {
             rt.call(pid, payload, duration)
                 .await
-                .map(|b| Python::with_gil(|py| PyBytes::new(py, &b).into_py(py)))
+                .map(|b| {
+                    pyo3::Python::attach(|py| {
+                        Ok::<Py<PyBytes>, PyErr>(PyBytes::new(py, &b).unbind())
+                    })
+                    .unwrap()
+                })
                 .map_err(pyo3::exceptions::PyRuntimeError::new_err)
         })
+    }
+
+    /// Alias for spawn_py_handler for backward compatibility.
+    #[pyo3(signature = (py_callable, budget=100, release_gil=None))]
+    fn spawn(
+        &self,
+        py_callable: Py<PyAny>,
+        budget: usize,
+        release_gil: Option<bool>,
+    ) -> PyResult<u64> {
+        self.spawn_py_handler(py_callable, budget, release_gil)
     }
 
     /// Spawns a push-based actor (original behavior).
     /// The `py_callable` is called with each message as an argument.
     /// If `release_gil` is true, the Python callback and hot-swap are executed
     /// in `tokio::task::spawn_blocking` so the actor's async loop doesn't hold the GIL.
+    #[pyo3(signature = (py_callable, budget, release_gil=None))]
     fn spawn_py_handler(
         &self,
-        py_callable: PyObject,
+        py_callable: Py<PyAny>,
         budget: usize,
         release_gil: Option<bool>,
     ) -> PyResult<u64> {
@@ -505,9 +530,9 @@ impl PyRuntime {
                             let _ = tx.send(task);
                         }
                         crate::mailbox::Message::Request { .. } => {
-                            let success = Python::with_gil(|py| {
+                            let success = Python::attach(|py| {
                                 let guard = behavior.read();
-                                let cb = guard.as_ref(py);
+                                let cb = guard.bind(py);
                                 let py_msg = message_to_py(py, msg);
                                 let mut ok = true;
                                 run_py_rescue_blocking(|| {
@@ -539,9 +564,9 @@ impl PyRuntime {
                                 };
                                 let _ = pool.sender.send(task);
                             } else {
-                                let success = Python::with_gil(|py| {
+                                let success = Python::attach(|py| {
                                     let guard = behavior.read();
-                                    let cb = guard.as_ref(py);
+                                    let cb = guard.bind(py);
                                     let pybytes = PyBytes::new(py, &bytes);
                                     let mut ok = true;
                                     run_py_rescue_blocking(|| {
@@ -569,19 +594,19 @@ impl PyRuntime {
                                 };
                                 let _ = pool.sender.send(task);
                             } else {
-                                Python::with_gil(|py| unsafe {
-                                    let new_obj = PyObject::from_owned_ptr(
-                                        py,
-                                        ptr as *mut pyo3::ffi::PyObject,
-                                    );
+                                Python::attach(|py| {
+                                    let new_obj = unsafe {
+                                        Bound::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject)
+                                            .unbind()
+                                    };
                                     *behavior.write() = new_obj;
                                 });
                             }
                         }
                         crate::mailbox::Message::Request { .. } => {
-                            let success = Python::with_gil(|py| {
+                            let success = Python::attach(|py| {
                                 let guard = behavior.read();
-                                let cb = guard.as_ref(py);
+                                let cb = guard.bind(py);
                                 let py_msg = message_to_py(py, msg);
                                 let mut ok = true;
                                 run_py_rescue_blocking(|| {
@@ -606,16 +631,18 @@ impl PyRuntime {
                         crate::mailbox::Message::System(
                             crate::mailbox::SystemMessage::HotSwap(ptr),
                         ) => {
-                            Python::with_gil(|py| unsafe {
-                                let new_obj =
-                                    PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject);
+                            Python::attach(|py| {
+                                let new_obj = unsafe {
+                                    Bound::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject)
+                                        .unbind()
+                                };
                                 *behavior.write() = new_obj;
                             });
                         }
                         crate::mailbox::Message::User(bytes) => {
-                            let success = Python::with_gil(|py| {
+                            let success = Python::attach(|py| {
                                 let guard = behavior.read();
-                                let cb = guard.as_ref(py);
+                                let cb = guard.bind(py);
                                 let pybytes = PyBytes::new(py, &bytes);
                                 let mut ok = true;
                                 run_py_rescue_blocking(|| {
@@ -633,9 +660,9 @@ impl PyRuntime {
                             }
                         }
                         crate::mailbox::Message::Request { .. } => {
-                            let success = Python::with_gil(|py| {
+                            let success = Python::attach(|py| {
                                 let guard = behavior.read();
-                                let cb = guard.as_ref(py);
+                                let cb = guard.bind(py);
                                 let py_msg = message_to_py(py, msg);
                                 let mut ok = true;
                                 run_py_rescue_blocking(|| {
@@ -681,7 +708,7 @@ impl PyRuntime {
     /// If `idle_timeout_ms` is set, the activated actor will auto-stop after that idle period.
     fn spawn_virtual_py_handler(
         &self,
-        py_callable: PyObject,
+        py_callable: Py<PyAny>,
         budget: usize,
         idle_timeout_ms: Option<u64>,
     ) -> PyResult<u64> {
@@ -703,16 +730,19 @@ impl PyRuntime {
                     crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(
                         ptr,
                     )) => {
-                        Python::with_gil(|py| unsafe {
-                            let new_obj =
-                                PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject);
+                        Python::attach(|py| {
+                            let new_obj = unsafe {
+                                Bound::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject).unbind()
+                            };
                             *behavior.write() = new_obj;
-                        });
+                            Ok::<(), PyErr>(())
+                        })
+                        .unwrap();
                     }
                     crate::mailbox::Message::User(bytes) => {
-                        let success = Python::with_gil(|py| {
+                        let success = Python::attach(|py| {
                             let guard = behavior.read();
-                            let cb = guard.as_ref(py);
+                            let cb = guard.bind(py);
                             let pybytes = PyBytes::new(py, &bytes);
                             let mut ok = true;
                             run_py_rescue_blocking(|| {
@@ -730,9 +760,9 @@ impl PyRuntime {
                         }
                     }
                     crate::mailbox::Message::Request { .. } => {
-                        let success = Python::with_gil(|py| {
+                        let success = Python::attach(|py| {
                             let guard = behavior.read();
-                            let cb = guard.as_ref(py);
+                            let cb = guard.bind(py);
                             let py_msg = message_to_py(py, msg);
                             let mut ok = true;
                             run_py_rescue_blocking(|| {
@@ -770,9 +800,10 @@ impl PyRuntime {
     }
 
     /// Bounded mailbox variant of spawn_py_handler.
+    #[pyo3(signature = (py_callable, budget, capacity, release_gil=None))]
     fn spawn_py_handler_bounded(
         &self,
-        py_callable: PyObject,
+        py_callable: Py<PyAny>,
         budget: usize,
         capacity: usize,
         release_gil: Option<bool>,
@@ -827,9 +858,9 @@ impl PyRuntime {
                                     };
                                     let _ = pool.sender.send(task);
                                 } else {
-                                    let success = Python::with_gil(|py| {
+                                    let success = Python::attach(|py| {
                                         let guard = behavior.read();
-                                        let cb = guard.as_ref(py);
+                                        let cb = guard.bind(py);
                                         let pybytes = PyBytes::new(py, &bytes);
                                         let mut ok = true;
                                         run_py_rescue_blocking(|| {
@@ -859,11 +890,14 @@ impl PyRuntime {
                                     };
                                     let _ = pool.sender.send(task);
                                 } else {
-                                    Python::with_gil(|py| unsafe {
-                                        let new_obj = PyObject::from_owned_ptr(
-                                            py,
-                                            ptr as *mut pyo3::ffi::PyObject,
-                                        );
+                                    Python::attach(|py| {
+                                        let new_obj = unsafe {
+                                            Bound::from_owned_ptr(
+                                                py,
+                                                ptr as *mut pyo3::ffi::PyObject,
+                                            )
+                                            .unbind()
+                                        };
                                         let mut guard = behavior.write();
                                         *guard = new_obj;
                                     });
@@ -876,19 +910,19 @@ impl PyRuntime {
                             crate::mailbox::Message::System(
                                 crate::mailbox::SystemMessage::HotSwap(ptr),
                             ) => {
-                                Python::with_gil(|py| unsafe {
-                                    let new_obj = PyObject::from_owned_ptr(
-                                        py,
-                                        ptr as *mut pyo3::ffi::PyObject,
-                                    );
+                                Python::attach(|py| {
+                                    let new_obj = unsafe {
+                                        Bound::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject)
+                                            .unbind()
+                                    };
                                     let mut guard = behavior.write();
                                     *guard = new_obj;
                                 });
                             }
                             crate::mailbox::Message::User(bytes) => {
-                                let success = Python::with_gil(|py| {
+                                let success = Python::attach(|py| {
                                     let guard = behavior.read();
-                                    let cb = guard.as_ref(py);
+                                    let cb = guard.bind(py);
                                     let pybytes = PyBytes::new(py, &bytes);
                                     let mut ok = true;
                                     run_py_rescue_blocking(|| {
@@ -906,9 +940,9 @@ impl PyRuntime {
                                 }
                             }
                             crate::mailbox::Message::Request { .. } => {
-                                let success = Python::with_gil(|py| {
+                                let success = Python::attach(|py| {
                                     let guard = behavior.read();
-                                    let cb = guard.as_ref(py);
+                                    let cb = guard.bind(py);
                                     let py_msg = message_to_py(py, msg);
                                     let mut ok = true;
                                     run_py_rescue_blocking(|| {
@@ -943,7 +977,7 @@ impl PyRuntime {
     fn spawn_child(
         &self,
         parent: u64,
-        py_callable: PyObject,
+        py_callable: Py<PyAny>,
         budget: Option<u32>,
         release_gil: Option<bool>,
     ) -> PyResult<u64> {
@@ -959,15 +993,16 @@ impl PyRuntime {
     fn spawn_child_pool(
         &self,
         parent: u64,
-        py_callable: PyObject,
+        py_callable: Py<PyAny>,
         workers: usize,
         budget: usize,
         release_gil: Option<bool>,
     ) -> PyResult<Vec<u64>> {
         let mut out = Vec::with_capacity(workers);
         for _ in 0..workers {
+            let py_callable_clone = Python::attach(|py| py_callable.clone_ref(py));
             let pid =
-                self.spawn_child_py_handler(parent, py_callable.clone(), budget, release_gil)?;
+                self.spawn_child_py_handler(parent, py_callable_clone, budget, release_gil)?;
             out.push(pid);
         }
         Ok(out)
@@ -978,7 +1013,7 @@ impl PyRuntime {
     fn spawn_child_py_handler(
         &self,
         parent: u64,
-        py_callable: PyObject,
+        py_callable: Py<PyAny>,
         budget: usize,
         release_gil: Option<bool>,
     ) -> PyResult<u64> {
@@ -1016,9 +1051,9 @@ impl PyRuntime {
                             let _ = tx.send(task);
                         }
                         crate::mailbox::Message::Request { .. } => {
-                            let success = Python::with_gil(|py| {
+                            let success = Python::attach(|py| {
                                 let guard = behavior.read();
-                                let cb = guard.as_ref(py);
+                                let cb = guard.bind(py);
                                 let py_msg = message_to_py(py, msg);
                                 let mut ok = true;
                                 run_py_rescue_blocking(|| {
@@ -1049,9 +1084,9 @@ impl PyRuntime {
                                 };
                                 let _ = pool.sender.send(task);
                             } else {
-                                let success = Python::with_gil(|py| {
+                                let success = Python::attach(|py| {
                                     let guard = behavior.read();
-                                    let cb = guard.as_ref(py);
+                                    let cb = guard.bind(py);
                                     let pybytes = PyBytes::new(py, &bytes);
                                     let mut ok = true;
                                     run_py_rescue_blocking(|| {
@@ -1079,16 +1114,12 @@ impl PyRuntime {
                                 };
                                 let _ = pool.sender.send(task);
                             } else {
-                                unsafe {
-                                    let new_obj = Python::with_gil(|py| {
-                                        PyObject::from_owned_ptr(
-                                            py,
-                                            ptr as *mut pyo3::ffi::PyObject,
-                                        )
-                                    });
-                                    let mut guard = behavior.write();
-                                    *guard = new_obj;
-                                }
+                                let new_obj = Python::attach(|py| unsafe {
+                                    Bound::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject)
+                                        .unbind()
+                                });
+                                let mut guard = behavior.write();
+                                *guard = new_obj;
                             }
                         }
                         _ => {}
@@ -1097,17 +1128,17 @@ impl PyRuntime {
                     match msg {
                         crate::mailbox::Message::System(
                             crate::mailbox::SystemMessage::HotSwap(ptr),
-                        ) => unsafe {
-                            let new_obj = Python::with_gil(|py| {
-                                PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject)
+                        ) => {
+                            let new_obj = Python::attach(|py| unsafe {
+                                Bound::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject).unbind()
                             });
                             let mut guard = behavior.write();
                             *guard = new_obj;
-                        },
+                        }
                         crate::mailbox::Message::User(bytes) => {
-                            let success = Python::with_gil(|py| {
+                            let success = Python::attach(|py| {
                                 let guard = behavior.read();
-                                let cb = guard.as_ref(py);
+                                let cb = guard.bind(py);
                                 let pybytes = PyBytes::new(py, &bytes);
                                 let mut ok = true;
                                 run_py_rescue_blocking(|| {
@@ -1125,9 +1156,9 @@ impl PyRuntime {
                             }
                         }
                         crate::mailbox::Message::Request { .. } => {
-                            let success = Python::with_gil(|py| {
+                            let success = Python::attach(|py| {
                                 let guard = behavior.read();
-                                let cb = guard.as_ref(py);
+                                let cb = guard.bind(py);
                                 let py_msg = message_to_py(py, msg);
                                 let mut ok = true;
                                 run_py_rescue_blocking(|| {
@@ -1160,7 +1191,7 @@ impl PyRuntime {
     /// Spawns a pull-based actor.
     /// The `py_callable` is called ONCE with a `PyMailbox` object in a dedicated OS thread.
     /// This mimics Erlang/Go style blocking actors without needing Python asyncio.
-    fn spawn_with_mailbox(&self, py_callable: PyObject, budget: usize) -> PyResult<u64> {
+    fn spawn_with_mailbox(&self, py_callable: Py<PyAny>, budget: usize) -> PyResult<u64> {
         let pid = self.inner.spawn_actor_with_budget(
             move |rx| async move {
                 let mailbox = PyMailbox {
@@ -1175,10 +1206,10 @@ impl PyRuntime {
                         return;
                     }
 
-                    Python::with_gil(|py| {
+                    Python::attach(|py| {
                         // Just call the function. It is expected to block on mailbox.recv()
                         run_py_rescue_blocking(|| {
-                            if let Err(e) = py_callable.call1(py, (mailbox,)) {
+                            if let Err(e) = py_callable.bind(py).call1((mailbox,)) {
                                 eprintln!("[Iris] Python mailbox actor exception: {}", e);
                                 e.print(py);
                             }
@@ -1200,7 +1231,7 @@ impl PyRuntime {
     fn spawn_child_with_mailbox(
         &self,
         parent: u64,
-        py_callable: PyObject,
+        py_callable: Py<PyAny>,
         budget: usize,
     ) -> PyResult<u64> {
         let pid = self.inner.spawn_child_with_budget(
@@ -1215,9 +1246,9 @@ impl PyRuntime {
                         return;
                     }
 
-                    Python::with_gil(|py| {
+                    Python::attach(|py| {
                         run_py_rescue_blocking(|| {
-                            if let Err(e) = py_callable.call1(py, (mailbox,)) {
+                            if let Err(e) = py_callable.bind(py).call1((mailbox,)) {
                                 eprintln!("[Iris] Python mailbox actor exception: {}", e);
                                 e.print(py);
                             }
@@ -1233,9 +1264,8 @@ impl PyRuntime {
         Ok(pid)
     }
 
-    fn send(&self, py: Python, pid: u64, data: &PyAny) -> PyResult<bool> {
-        let _ = py;
-        let msg = py_any_to_bytes(data)?;
+    fn send(&self, _py: Python, pid: u64, data: Bound<'_, PyAny>) -> PyResult<bool> {
+        let msg = py_any_to_bytes(&data)?;
         // Keep GIL for single-message sends so hot push-actor loops do not
         // interleave callback execution on every call.
         Ok(self.inner.send_user(pid, msg).is_ok())
@@ -1244,9 +1274,9 @@ impl PyRuntime {
     /// Batch-send bytes-like payloads to a PID.
     ///
     /// Returns the number of payloads accepted by the mailbox.
-    fn send_many(&self, py: Python, pid: u64, payloads: &PyAny) -> PyResult<usize> {
+    fn send_many(&self, py: Python, pid: u64, payloads: Bound<'_, PyAny>) -> PyResult<usize> {
         let cap_hint = payloads.len().unwrap_or(0);
-        let iter = payloads.iter().map_err(|_| {
+        let iter = payloads.try_iter().map_err(|_| {
             pyo3::exceptions::PyTypeError::new_err(
                 "payloads must be an iterable of bytes-like objects",
             )
@@ -1255,16 +1285,16 @@ impl PyRuntime {
         let mut converted = Vec::with_capacity(cap_hint);
         for item in iter {
             let data = item?;
-            converted.push(py_any_to_bytes(data)?);
+            converted.push(py_any_to_bytes(&data)?);
         }
 
         let rt = self.inner.clone();
-        Ok(py.allow_threads(move || rt.send_user_many(pid, converted)))
+        Ok(py.detach(move || rt.send_user_many(pid, converted)))
     }
 
     /// Schedule a one-shot send from Python. Returns a numeric timer id.
-    fn send_after(&self, pid: u64, delay_ms: u64, data: &PyAny) -> PyResult<u64> {
-        let msg = py_any_to_bytes(data)?;
+    fn send_after(&self, pid: u64, delay_ms: u64, data: Bound<'_, PyAny>) -> PyResult<u64> {
+        let msg = py_any_to_bytes(&data)?;
         let id = self
             .inner
             .send_after(pid, delay_ms, crate::mailbox::Message::User(msg));
@@ -1272,8 +1302,8 @@ impl PyRuntime {
     }
 
     /// Schedule a repeating interval send from Python. Returns a numeric timer id.
-    fn send_interval(&self, pid: u64, interval_ms: u64, data: &PyAny) -> PyResult<u64> {
-        let msg = py_any_to_bytes(data)?;
+    fn send_interval(&self, pid: u64, interval_ms: u64, data: Bound<'_, PyAny>) -> PyResult<u64> {
+        let msg = py_any_to_bytes(&data)?;
         let id = self
             .inner
             .send_interval(pid, interval_ms, crate::mailbox::Message::User(msg));
@@ -1286,13 +1316,14 @@ impl PyRuntime {
     }
 
     /// Await selectively on observed messages for `pid` using a Python callable.
+    #[pyo3(signature = (pid, matcher, timeout=None))]
     fn selective_recv_observed_py<'py>(
         &self,
         py: Python<'py>,
         pid: u64,
-        matcher: PyObject,
+        matcher: Py<PyAny>,
         timeout: Option<f64>,
-    ) -> PyResult<&'py PyAny> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let rt = self.inner.clone();
         future_into_py(py, async move {
             let op = async {
@@ -1300,10 +1331,16 @@ impl PyRuntime {
                     // Attempt to take a matching observed message atomically.
                     if let Some(m) = rt.take_observed_message_matching(pid, |msg| {
                         // Call into Python matcher to decide.
-                        Python::with_gil(|py| run_python_matcher(py, &matcher, msg))
+                        Python::attach(|py| {
+                            Ok::<bool, PyErr>(run_python_matcher(py, matcher.bind(py), msg))
+                        })
+                        .unwrap_or(false)
                     }) {
                         // Convert the message into a Python object before returning.
-                        return Python::with_gil(|py| message_to_py(py, m));
+                        return Ok(Python::attach(|py| {
+                            Ok::<Py<PyAny>, PyErr>(message_to_py(py, m))
+                        })
+                        .unwrap());
                     }
 
                     // Not found yet — yield a bit and try again.
@@ -1313,17 +1350,17 @@ impl PyRuntime {
 
             if let Some(sec) = timeout {
                 match tokio::time::timeout(Duration::from_secs_f64(sec), op).await {
-                    Ok(val) => Ok(val),
-                    Err(_) => Ok(Python::with_gil(|py| py.None())),
+                    Ok(val) => val,
+                    Err(_) => Ok(Python::attach(|py| Ok::<Py<PyAny>, PyErr>(py.None())).unwrap()),
                 }
             } else {
-                Ok(op.await)
+                op.await
             }
         })
     }
 
     /// Retrieves messages from an observed actor.
-    fn get_messages(&self, py: Python, pid: u64) -> PyResult<Vec<PyObject>> {
+    fn get_messages(&self, py: Python, pid: u64) -> PyResult<Vec<Py<PyAny>>> {
         if let Some(vec) = self.inner.get_observed_messages(pid) {
             let out = vec
                 .into_iter()
@@ -1440,7 +1477,7 @@ impl PyRuntime {
     fn supervise_with_factory(
         &self,
         pid: u64,
-        py_factory: PyObject,
+        py_factory: Py<PyAny>,
         strategy: &str,
     ) -> PyResult<()> {
         use std::sync::Arc;
@@ -1451,21 +1488,22 @@ impl PyRuntime {
             _ => return Err(pyo3::exceptions::PyValueError::new_err("invalid strategy")),
         };
 
-        let _initial_pid = Python::with_gil(|py| {
-            let obj = py_factory.as_ref(py);
+        let _initial_pid = Python::attach(|py| {
+            let obj = py_factory.bind(py);
             let called = obj.call0()?;
             let pid: u64 = called.extract()?;
             Ok::<u64, pyo3::PyErr>(pid)
         })?;
 
-        let factory_py = py_factory.clone();
+        let factory_py =
+            Python::attach(|py| Ok::<Py<PyAny>, PyErr>(py_factory.clone_ref(py))).unwrap();
         let factory_closure: Arc<dyn Fn() -> Result<crate::pid::Pid, String> + Send + Sync> =
             Arc::new(move || {
                 if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
                     return Err("Interpreter shutting down".to_string());
                 }
-                Python::with_gil(|py| {
-                    let obj = factory_py.as_ref(py);
+                Python::attach(|py| {
+                    let obj = factory_py.bind(py);
                     match obj.call0() {
                         Ok(v) => match v.extract::<u64>() {
                             Ok(pid) => Ok(pid),
@@ -1485,7 +1523,7 @@ impl PyRuntime {
         &self,
         path: String,
         pid: u64,
-        py_factory: PyObject,
+        py_factory: Py<PyAny>,
         strategy: &str,
     ) -> PyResult<()> {
         use std::sync::Arc;
@@ -1497,21 +1535,22 @@ impl PyRuntime {
         };
 
         // Validate we can call the factory once to obtain an initial pid
-        let _initial_pid = Python::with_gil(|py| {
-            let obj = py_factory.as_ref(py);
+        let _initial_pid = Python::attach(|py| {
+            let obj = py_factory.bind(py);
             let called = obj.call0()?;
             let pid: u64 = called.extract()?;
             Ok::<u64, pyo3::PyErr>(pid)
         })?;
 
-        let factory_py = py_factory.clone();
+        let factory_py =
+            Python::attach(|py| Ok::<Py<PyAny>, PyErr>(py_factory.clone_ref(py))).unwrap();
         let factory_closure: Arc<dyn Fn() -> Result<crate::pid::Pid, String> + Send + Sync> =
             Arc::new(move || {
                 if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
                     return Err("Interpreter shutting down".to_string());
                 }
-                Python::with_gil(|py| {
-                    let obj = factory_py.as_ref(py);
+                Python::attach(|py| {
+                    let obj = factory_py.bind(py);
                     match obj.call0() {
                         Ok(v) => match v.extract::<u64>() {
                             Ok(pid) => Ok(pid),

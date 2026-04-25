@@ -66,15 +66,11 @@ async fn test_core_call_response() {
         move |msg| {
             let rt_inner = rt_clone.clone();
             async move {
-                match msg {
-                    mailbox::Message::Request { reply_to, payload } => {
-                        // Return "pong" if "ping"
-                        if &payload[..] == b"ping" {
-                            let _ =
-                                rt_inner.send_user(reply_to, bytes::Bytes::from_static(b"pong"));
-                        }
+                if let mailbox::Message::Request { reply_to, payload } = msg {
+                    // Return "pong" if "ping"
+                    if &payload[..] == b"ping" {
+                        let _ = rt_inner.send_user(reply_to, bytes::Bytes::from_static(b"pong"));
                     }
-                    _ => {}
                 }
             }
         },

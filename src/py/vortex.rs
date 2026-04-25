@@ -61,7 +61,7 @@ fn set_guard_telemetry(mode: &str, reason: &str, py_minor: i32, attempted: bool,
     }
 }
 
-fn test_hook_enabled(py: Python, key: &str) -> bool {
+fn test_hook_enabled(py: Python<'_>, key: &str) -> bool {
     let locals = PyDict::new(py);
     if locals.set_item("_iris_key", key).is_err() {
         return false;
@@ -69,14 +69,14 @@ fn test_hook_enabled(py: Python, key: &str) -> bool {
     py.eval(
         "__import__('os').environ.get(_iris_key, '0') == '1'",
         None,
-        Some(locals),
+        Some(&locals),
     )
     .and_then(|v| v.extract::<bool>())
     .unwrap_or(false)
 }
 
 #[pyfunction]
-pub fn get_guard_status(py: Python) -> PyResult<PyObject> {
+pub fn get_guard_status(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let g = GUARD_TELEMETRY
         .lock()
         .map_err(|_| {
@@ -90,7 +90,7 @@ pub fn get_guard_status(py: Python) -> PyResult<PyObject> {
     d.set_item("py_minor", g.py_minor)?;
     d.set_item("rewrite_attempted", g.rewrite_attempted)?;
     d.set_item("rewrite_applied", g.rewrite_applied)?;
-    Ok(d.into())
+    Ok(d.unbind().into_any())
 }
 
 #[pyfunction]
@@ -134,8 +134,8 @@ pub fn get_isolation_disallowed_ops() -> Vec<u8> {
 }
 
 #[pyfunction]
-pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
-    fn opcode_name(py: Python, op: u8) -> String {
+pub fn transmute_function(py: Python<'_>, py_func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn opcode_name(py: Python<'_>, op: u8) -> String {
         py.import("opcode")
             .and_then(|m| m.getattr("opname"))
             .and_then(|names| names.get_item(op as usize))
@@ -144,7 +144,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
     }
 
     let py_minor: i32 = py
-        .eval("__import__('sys').version_info.minor", None, None)
+        .eval_bound("__import__('sys').version_info.minor", None, None)
         .and_then(|v| v.extract())
         .unwrap_or(99);
 
@@ -161,10 +161,11 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         .getattr("__code__")
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/code: {e}")))?;
     let code_ptr = code.as_ptr() as usize;
-    let raw: &[u8] = code
+    let raw: Bound<'_, PyBytes> = code
         .getattr("co_code")
         .and_then(|v| v.extract())
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/co_code: {e}")))?;
+    let raw_bytes = raw.as_bytes();
     let original_stack_size: usize = code
         .getattr("co_stacksize")
         .and_then(|v| v.extract())
@@ -179,7 +180,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals-cast: {e}"))
     })?;
     let local_mod = match py
-        .import("sys")
+        .import_bound("sys")
         .and_then(|s| s.getattr("modules"))
         .and_then(|mods| mods.get_item("iris"))
     {
@@ -229,13 +230,13 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         }
     };
 
-    if let Err(reason) = evaluate_rewrite_compatibility(raw, meta.extended_arg, &quickening) {
+    if let Err(reason) = evaluate_rewrite_compatibility(raw_bytes, meta.extended_arg, &quickening) {
         set_guard_telemetry("fallback", reason, py_minor, false, false);
         return fallback_with_log(py, py_func, &fn_name, reason);
     }
 
     if verify_stacksize_minimum(original_stack_size).is_err() {
-        let original_preview = decode_wordcode(raw, meta.extended_arg);
+        let original_preview = decode_wordcode(raw_bytes, meta.extended_arg);
         if let Ok(preview_probe) = probe_instructions(py, meta.extended_arg) {
             let preview_sites = probe_injection_sites(&original_preview, &meta);
             let preview_probe_desc = preview_probe
@@ -268,7 +269,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         return fallback_with_log(py, py_func, &fn_name, "stack depth invariant failed");
     }
 
-    let original_entries = match read_exception_entries(py, code) {
+    let original_entries = match read_exception_entries(py, &code) {
         Ok(entries) => entries,
         Err(_) => {
             set_guard_telemetry(
@@ -306,8 +307,12 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         );
     }
 
-    if verify_exception_table_invariants(&original_entries, raw.len() / 2, original_stack_size)
-        .is_err()
+    if verify_exception_table_invariants(
+        &original_entries,
+        raw_bytes.len() / 2,
+        original_stack_size,
+    )
+    .is_err()
         || test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_EXCEPTION_TABLE_INVALID")
     {
         set_guard_telemetry(
@@ -320,7 +325,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         return fallback_with_log(py, py_func, &fn_name, "exception table invalid");
     }
 
-    let original = decode_wordcode(raw, meta.extended_arg);
+    let original = decode_wordcode(raw_bytes, meta.extended_arg);
     if verify_exception_handler_targets(&original_entries, &original, &quickening).is_err() {
         set_guard_telemetry(
             "fallback",
@@ -436,9 +441,9 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
     let mut ext_acc: u32 = 0;
     let mut i = 0usize;
     let mut ins_idx = 0usize;
-    while i + 1 < raw.len() {
-        let op = raw[i];
-        let arg = raw[i + 1] as u32;
+    while i + 1 < raw_bytes.len() {
+        let op = raw_bytes[i];
+        let arg = raw_bytes[i + 1] as u32;
         if op == meta.extended_arg {
             ext_acc = (ext_acc << 8) | arg;
             i += 2;
@@ -573,7 +578,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
     }
 
     let kwargs = [("co_code", PyBytes::new(py, &final_raw))].into_py_dict(py);
-    let new_code = match code.call_method("replace", (), Some(kwargs)) {
+    let new_code = match code.call_method("replace", (), Some(&kwargs)) {
         Ok(v) => v,
         Err(_) => {
             set_guard_telemetry("fallback", "code_replace_failed", py_minor, true, false);
@@ -595,7 +600,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             return fallback_with_log(py, py_func, &fn_name, "patched stack metadata unavailable");
         }
     };
-    let patched_entries = match read_exception_entries(py, new_code) {
+    let patched_entries = match read_exception_entries(py, &new_code) {
         Ok(v) => v,
         Err(_) => {
             set_guard_telemetry(
@@ -650,20 +655,24 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         }
     };
 
-    let func_globals: &PyDict = if ISOLATION_MODE.load(Ordering::Relaxed) {
+    let func_globals = if ISOLATION_MODE.load(Ordering::Relaxed) {
         let locals2 = PyDict::new(py);
         locals2.set_item("base_globals", globals)?;
         // Isolation uses a detached globals dict so STORE_GLOBAL/STORE_NAME mutate only
         // this shadow environment, never the original module globals.
-        py.run("isolated_globals = dict(base_globals)", None, Some(locals2))?;
+        py.run(
+            "isolated_globals = dict(base_globals)",
+            None,
+            Some(&locals2),
+        )?;
         locals2
             .get_item("isolated_globals")?
             .ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("vortex/isolated-globals: missing result")
             })?
-            .downcast::<PyDict>()?
+            .downcast_into::<PyDict>()?
     } else {
-        globals
+        globals.clone()
     };
 
     let shadow = match types_mod.getattr("FunctionType").and_then(|ctor| {
@@ -692,15 +701,15 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         let _ = shadow.setattr("__kwdefaults__", kwdefaults);
     }
     set_guard_telemetry("rewrite", "applied", py_minor, true, true);
-    Ok(shadow.into())
+    Ok(shadow.unbind().into_any())
 }
 
 fn fallback_with_log(
-    py: Python,
-    py_func: &PyAny,
+    py: Python<'_>,
+    py_func: &Bound<'_, PyAny>,
     fn_name: &str,
     reason: &str,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     transmute_log(&format!(
         "[Ocular][Transmute] fallback fn={} reason={}",
         fn_name, reason
@@ -708,7 +717,11 @@ fn fallback_with_log(
     fallback_shadow(py, py_func, reason)
 }
 
-fn fallback_shadow(py: Python, py_func: &PyAny, _reason: &str) -> PyResult<PyObject> {
+fn fallback_shadow(
+    py: Python<'_>,
+    py_func: &Bound<'_, PyAny>,
+    _reason: &str,
+) -> PyResult<Py<PyAny>> {
     let globals_any = py_func
         .getattr("__globals__")
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals: {e}")))?;
@@ -762,7 +775,7 @@ def _iris_make_shadow(fn, isolation_mode=False):
 shadow = _iris_make_shadow(fn, isolation_mode)
 "#,
         Some(globals),
-        Some(locals),
+        Some(&locals),
     )
     .map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/shadow-fallback: {e}"))
@@ -771,10 +784,10 @@ shadow = _iris_make_shadow(fn, isolation_mode)
         pyo3::exceptions::PyRuntimeError::new_err("vortex/shadow-fallback: missing shadow")
     })?;
 
-    Ok(shadow.into())
+    Ok(shadow.unbind().into_any())
 }
 
-pub fn init_py(m: &PyModule) -> PyResult<()> {
+pub fn init_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("VortexSuspend", m.py().get_type::<VortexSuspend>())?;
     m.add_function(wrap_pyfunction!(_vortex_check, m)?)?;
     m.add_function(wrap_pyfunction!(set_budget, m)?)?;

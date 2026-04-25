@@ -9,7 +9,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 /// A wrapper around a live MailboxReceiver for Python actors.
 /// Revamped: Now purely blocking/synchronous to Python, running in dedicated threads.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct PyMailbox {
     pub(crate) inner: Arc<TokioMutex<crate::mailbox::MailboxReceiver>>,
@@ -19,7 +19,8 @@ pub struct PyMailbox {
 impl PyMailbox {
     /// Receive the next message (Blocking).
     /// Releases the GIL while waiting. Checks for Python signals cleanly to allow Ctrl+C escapes.
-    fn recv(&self, py: Python, timeout: Option<f64>) -> PyResult<PyObject> {
+    #[pyo3(signature = (timeout=None))]
+    fn recv(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Py<PyAny>> {
         let rx = self.inner.clone();
         let start = std::time::Instant::now();
         let timeout_dur = timeout.map(std::time::Duration::from_secs_f64);
@@ -40,7 +41,7 @@ impl PyMailbox {
             };
 
             // Release GIL to allow other threads to run while we block on the channel
-            let res = py.allow_threads(|| {
+            let res = py.detach(|| {
                 crate::RUNTIME.block_on(async {
                     let fut = async {
                         let mut guard = rx.lock().await;
@@ -68,12 +69,13 @@ impl PyMailbox {
 
     /// Selectively receive a message matching a Python predicate (Blocking).
     /// Releases the GIL while waiting. Checks for Python signals cleanly.
+    #[pyo3(signature = (matcher, timeout=None))]
     fn selective_recv(
         &self,
-        py: Python,
-        matcher: PyObject,
+        py: Python<'_>,
+        matcher: Py<PyAny>,
         timeout: Option<f64>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let rx = self.inner.clone();
         let start = std::time::Instant::now();
         let timeout_dur = timeout.map(std::time::Duration::from_secs_f64);
@@ -92,13 +94,16 @@ impl PyMailbox {
                 wait_time
             };
 
-            let res = py.allow_threads(|| {
+            let res = py.detach(|| {
                 crate::RUNTIME.block_on(async {
                     let fut = async {
                         let mut guard = rx.lock().await;
                         guard
                             .selective_recv(|msg| {
-                                Python::with_gil(|py| run_python_matcher(py, &matcher, msg))
+                                Python::attach(|py| {
+                                    Ok::<bool, PyErr>(run_python_matcher(py, matcher.bind(py), msg))
+                                })
+                                .unwrap_or(false)
                             })
                             .await
                     };

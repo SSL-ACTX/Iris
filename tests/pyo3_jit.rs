@@ -10,10 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[tokio::test]
 async fn py_jit_quantum_profile_persists_in_short_run() {
-    pyo3::prepare_freethreaded_python();
-
     let has_msgpack = Python::with_gil(|py| {
-        py.import("importlib.util")
+        py.import(pyo3::ffi::c_str!("importlib.util"))
             .ok()
             .and_then(|u| u.call_method1("find_spec", ("msgpack",)).ok())
             .map(|spec| !spec.is_none())
@@ -42,7 +40,7 @@ def warm_add_short(x):
 
     Python::with_gil(|py| {
         let ext = iris::py::make_module(py).expect("make_module");
-        let sys = py.import("sys").unwrap();
+        let sys = py.import(pyo3::ffi::c_str!("sys")).unwrap();
         let modules = sys
             .getattr("modules")
             .unwrap()
@@ -57,7 +55,7 @@ def warm_add_short(x):
         modules.set_item("iris", pkg).unwrap();
         modules.set_item("iris.iris", ext.clone_ref(py)).unwrap();
 
-        let importlib_util = py.import("importlib.util").unwrap();
+        let importlib_util = py.import(pyo3::ffi::c_str!("importlib.util")).unwrap();
         let module_name = "warm_short_mod";
         let module_path_s = module_path.to_string_lossy().to_string();
 
@@ -73,7 +71,7 @@ def warm_add_short(x):
             .unwrap();
         modules.set_item(module_name, module).unwrap();
 
-        let jit_mod = py.import("iris.jit").unwrap();
+        let jit_mod = py.import(pyo3::ffi::c_str!("iris.jit")).unwrap();
         jit_mod
             .getattr("set_quantum_speculation")
             .unwrap()
@@ -127,10 +125,8 @@ def warm_add_short(x):
 
 #[tokio::test]
 async fn py_jit_quantum_metadata_unchanged_does_not_rewrite() {
-    pyo3::prepare_freethreaded_python();
-
     let has_msgpack = Python::with_gil(|py| {
-        py.import("importlib.util")
+        py.import(pyo3::ffi::c_str!("importlib.util"))
             .ok()
             .and_then(|u| u.call_method1("find_spec", ("msgpack",)).ok())
             .map(|spec| !spec.is_none())
@@ -159,7 +155,7 @@ def warm_noop(x):
 
     Python::with_gil(|py| {
         let ext = iris::py::make_module(py).expect("make_module");
-        let sys = py.import("sys").unwrap();
+        let sys = py.import(pyo3::ffi::c_str!("sys")).unwrap();
         let modules = sys
             .getattr("modules")
             .unwrap()
@@ -174,7 +170,7 @@ def warm_noop(x):
         modules.set_item("iris", pkg).unwrap();
         modules.set_item("iris.iris", ext.clone_ref(py)).unwrap();
 
-        let importlib_util = py.import("importlib.util").unwrap();
+        let importlib_util = py.import(pyo3::ffi::c_str!("importlib.util")).unwrap();
         let module_name = "warm_noop_mod";
         let module_path_s = module_path.to_string_lossy().to_string();
 
@@ -190,7 +186,7 @@ def warm_noop(x):
             .unwrap();
         modules.set_item(module_name, module).unwrap();
 
-        let jit_mod = py.import("iris.jit").unwrap();
+        let jit_mod = py.import(pyo3::ffi::c_str!("iris.jit")).unwrap();
         jit_mod.setattr("_IRIS_META_FLUSH_MIN", 1_i64).unwrap();
         jit_mod.setattr("_IRIS_META_FLUSH_MAX", 1_i64).unwrap();
         jit_mod
@@ -276,10 +272,8 @@ def warm_noop(x):
 
 #[tokio::test]
 async fn py_jit_warm_seed_prefers_single_variant_compile() {
-    pyo3::prepare_freethreaded_python();
-
     let has_msgpack = Python::with_gil(|py| {
-        py.import("importlib.util")
+        py.import(pyo3::ffi::c_str!("importlib.util"))
             .ok()
             .and_then(|u| u.call_method1("find_spec", ("msgpack",)).ok())
             .map(|spec| !spec.is_none())
@@ -308,7 +302,7 @@ def warm_single(x):
 
     Python::with_gil(|py| {
         let ext = iris::py::make_module(py).expect("make_module");
-        let sys = py.import("sys").unwrap();
+        let sys = py.import(pyo3::ffi::c_str!("sys")).unwrap();
         let modules = sys
             .getattr("modules")
             .unwrap()
@@ -323,11 +317,11 @@ def warm_single(x):
         modules.set_item("iris", pkg).unwrap();
         modules.set_item("iris.iris", ext.clone_ref(py)).unwrap();
 
-        let importlib_util = py.import("importlib.util").unwrap();
+        let importlib_util = py.import(pyo3::ffi::c_str!("importlib.util")).unwrap();
         let module_name = "warm_single_mod";
         let module_path_s = module_path.to_string_lossy().to_string();
 
-        let jit_mod = py.import("iris.jit").unwrap();
+        let jit_mod = py.import(pyo3::ffi::c_str!("iris.jit")).unwrap();
         jit_mod.setattr("_IRIS_META_FLUSH_MIN", 1_i64).unwrap();
         jit_mod.setattr("_IRIS_META_FLUSH_MAX", 1_i64).unwrap();
         jit_mod
@@ -425,10 +419,8 @@ def warm_single(x):
 
 #[tokio::test]
 async fn py_jit_quantum_profile_persists_and_warm_starts_from_pycache() {
-    pyo3::prepare_freethreaded_python();
-
     let has_msgpack = Python::with_gil(|py| {
-        py.import("importlib.util")
+        py.import(pyo3::ffi::c_str!("importlib.util"))
             .ok()
             .and_then(|u| u.call_method1("find_spec", ("msgpack",)).ok())
             .map(|spec| !spec.is_none())
@@ -457,7 +449,7 @@ def warm_add(x):
 
     Python::with_gil(|py| {
         let ext = iris::py::make_module(py).expect("make_module");
-        let sys = py.import("sys").unwrap();
+        let sys = py.import(pyo3::ffi::c_str!("sys")).unwrap();
         let modules = sys
             .getattr("modules")
             .unwrap()
@@ -472,7 +464,7 @@ def warm_add(x):
         modules.set_item("iris", pkg).unwrap();
         modules.set_item("iris.iris", ext.clone_ref(py)).unwrap();
 
-        let importlib_util = py.import("importlib.util").unwrap();
+        let importlib_util = py.import(pyo3::ffi::c_str!("importlib.util")).unwrap();
         let module_name = "warm_mod";
         let module_path_s = module_path.to_string_lossy().to_string();
 
@@ -488,7 +480,7 @@ def warm_add(x):
             .unwrap();
         modules.set_item(module_name, module).unwrap();
 
-        let jit_mod = py.import("iris.jit").unwrap();
+        let jit_mod = py.import(pyo3::ffi::c_str!("iris.jit")).unwrap();
         jit_mod
             .getattr("set_quantum_speculation")
             .unwrap()
@@ -656,8 +648,6 @@ assert len(entries) <= 256
 
 #[tokio::test]
 async fn py_jit_offload_falls_back_on_jit_error() {
-    pyo3::prepare_freethreaded_python();
-
     Python::with_gil(|py| {
         let module = iris::py::make_module(py).expect("make_module");
         let register = module
@@ -701,8 +691,6 @@ async fn py_jit_offload_falls_back_on_jit_error() {
 
 #[tokio::test]
 async fn py_jit_offload_decorator_async() {
-    pyo3::prepare_freethreaded_python();
-
     Python::with_gil(|py| {
         let module = iris::py::make_module(py).expect("make_module");
         let register = module
@@ -1557,8 +1545,6 @@ async fn py_jit_offload_decorator_async() {
 
 #[tokio::test]
 async fn py_jit_step_loop_api_executes_in_rust() {
-    pyo3::prepare_freethreaded_python();
-
     Python::with_gil(|py| {
         let module = iris::py::make_module(py).expect("make_module");
         let register = module
