@@ -5,7 +5,6 @@ use crate::vortex::ocular::state::{
     PROCESSED_EVENTS,
 };
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
 
 const HOT_TRACE_EXPORT: bool = false;
 use std::collections::HashMap;
@@ -50,8 +49,8 @@ pub fn telemetry_worker() {
                             if let std::collections::hash_map::Entry::Vacant(e) =
                                 code_registry.entry(code_ptr)
                             {
-                                Python::with_gil(|py| {
-                                    let bound_code = code_obj.as_ref(py);
+                                Python::attach(|py| {
+                                    let bound_code = code_obj.bind(py);
 
                                     let func_name = bound_code
                                         .getattr("co_name")
@@ -61,17 +60,18 @@ pub fn telemetry_worker() {
                                     let mut base_opcodes = HashMap::new();
                                     let mut valid_offsets = Vec::new();
 
-                                    if let Ok(dis) = py.import("dis") {
-                                        let kwargs = PyDict::new(py);
+                                    if let Ok(dis) = py.import(pyo3::ffi::c_str!("dis")) {
+                                        let kwargs = pyo3::types::PyDict::new(py);
                                         let _ = kwargs.set_item("adaptive", false);
 
                                         if let Ok(instructions) = dis.call_method(
                                             "get_instructions",
                                             (bound_code,),
-                                            Some(kwargs),
+                                            Some(&kwargs),
                                         ) {
-                                            if let Ok(iter) = instructions.iter() {
-                                                for inst in iter.flatten() {
+                                            if let Ok(iter) = instructions.try_iter() {
+                                                for inst_res in iter {
+                                                    let inst: Bound<'_, PyAny> = inst_res?;
                                                     let offset = inst
                                                         .getattr("offset")
                                                         .ok()
@@ -136,7 +136,9 @@ pub fn telemetry_worker() {
                                         filename,
                                         firstlineno,
                                     });
-                                });
+                                    Ok::<(), PyErr>(())
+                                })
+                                .unwrap();
                             }
                         }
 
@@ -311,9 +313,9 @@ pub fn telemetry_worker() {
         trace_dump_lines.push("------------------------------------------------".to_string());
 
         let is_precise = IS_PRECISE.load(Ordering::Relaxed);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let mut disassembly_cache: HashMap<usize, HashMap<i32, String>> = HashMap::new();
-            let dis_module = py.import("dis").ok();
+            let dis_module = py.import(pyo3::ffi::c_str!("dis")).ok();
 
             for (idx, (c_ptr, lasti)) in top_trace.into_iter().enumerate() {
                 let mut opcode_base = "UNKNOWN".to_string();
@@ -327,26 +329,26 @@ pub fn telemetry_worker() {
                     let inst_map = disassembly_cache.entry(c_ptr).or_insert_with(|| {
                         let mut map = HashMap::new();
                         if let Some(dis) = &dis_module {
-                            let kwargs = PyDict::new(py);
+                            let kwargs = pyo3::types::PyDict::new(py);
                             let _ = kwargs.set_item("adaptive", true);
                             let mut dis_result = dis.call_method(
                                 "get_instructions",
-                                (meta.code_obj.as_ref(py),),
-                                Some(kwargs),
+                                (meta.code_obj.bind(py),),
+                                Some(&kwargs),
                             );
 
                             if dis_result.is_err() {
-                                let fallback_kwargs = PyDict::new(py);
+                                let fallback_kwargs = pyo3::types::PyDict::new(py);
                                 let _ = fallback_kwargs.set_item("adaptive", false);
                                 dis_result = dis.call_method(
                                     "get_instructions",
-                                    (meta.code_obj.as_ref(py),),
-                                    Some(fallback_kwargs),
+                                    (meta.code_obj.bind(py),),
+                                    Some(&fallback_kwargs),
                                 );
                             }
 
                             if let Ok(instructions) = dis_result {
-                                if let Ok(iter) = instructions.iter() {
+                                if let Ok(iter) = instructions.try_iter() {
                                     for inst in iter.flatten() {
                                         let offset = inst
                                             .getattr("offset")
@@ -395,7 +397,9 @@ pub fn telemetry_worker() {
                 println!("{}", line);
                 trace_dump_lines.push(line);
             }
-        });
+            Ok::<(), PyErr>(())
+        })
+        .unwrap();
 
         println!("[Ocular] ------------------------------------------------");
 

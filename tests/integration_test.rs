@@ -20,10 +20,17 @@ async fn actor_recv_and_cleanup() {
         .unwrap();
 
     // allow actor to process and exit
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mut dead = false;
+    for _ in 0..10 {
+        if !rt.is_alive(pid) {
+            dead = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 
     // actor should have cleaned up
-    assert!(!rt.is_alive(pid));
+    assert!(dead, "actor should have cleaned up");
 }
 
 #[tokio::test]

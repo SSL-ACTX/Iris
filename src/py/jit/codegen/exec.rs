@@ -4,7 +4,9 @@
 use std::collections::HashSet;
 
 #[cfg(feature = "pyo3")]
-use pyo3::{AsPyPointer, IntoPy};
+use pyo3::prelude::*;
+#[cfg(feature = "pyo3")]
+use pyo3::IntoPyObjectExt;
 
 use crate::py::jit::simd;
 
@@ -478,17 +480,19 @@ pub(crate) fn simd_unroll_factor() -> usize {
 
 #[cfg(feature = "pyo3")]
 #[inline(always)]
-fn jit_return_to_py(py: pyo3::Python, value: f64, return_type: JitReturnType) -> pyo3::PyObject {
+fn jit_return_to_py(py: Python<'_>, value: f64, return_type: JitReturnType) -> Py<PyAny> {
     match return_type {
-        JitReturnType::Float => value.into_py(py),
-        JitReturnType::Int => (value as i64).into_py(py),
-        JitReturnType::Bool => (value != 0.0).into_py(py),
+        JitReturnType::Float => value.into_py_any(py).unwrap(),
+        JitReturnType::Int => (value as i64).into_py_any(py).unwrap(),
+        JitReturnType::Bool => (value != 0.0).into_py_any(py).unwrap(),
     }
 }
 
 #[cfg(feature = "pyo3")]
 #[inline(always)]
-fn vec_f64_to_py(py: pyo3::Python, values: &[f64], return_type: JitReturnType) -> pyo3::PyObject {
+fn vec_f64_to_py(py: Python<'_>, values: &[f64], return_type: JitReturnType) -> Py<PyAny> {
+    use pyo3::types::PyBytes;
+    use pyo3::types::PyList;
     match return_type {
         JitReturnType::Float => {
             let byte_slice = unsafe {
@@ -497,22 +501,22 @@ fn vec_f64_to_py(py: pyo3::Python, values: &[f64], return_type: JitReturnType) -
                     std::mem::size_of_val(values),
                 )
             };
-            let py_bytes = pyo3::types::PyBytes::new(py, byte_slice);
-            let array_mod = py.import("array").unwrap();
+            let py_bytes = PyBytes::new(py, byte_slice);
+            let array_mod = py.import(pyo3::ffi::c_str!("array")).unwrap();
             let array_obj = array_mod
                 .getattr("array")
                 .unwrap()
                 .call1(("d", py_bytes))
                 .unwrap();
-            array_obj.into_py(py)
+            array_obj.unbind()
         }
         JitReturnType::Int => {
-            let list = pyo3::types::PyList::new(py, values.iter().map(|v| *v as i64));
-            list.into_py(py)
+            let list = PyList::new(py, values.iter().map(|v| *v as i64)).unwrap();
+            list.unbind().into_any()
         }
         JitReturnType::Bool => {
-            let list = pyo3::types::PyList::new(py, values.iter().map(|v| *v != 0.0));
-            list.into_py(py)
+            let list = PyList::new(py, values.iter().map(|v| *v != 0.0)).unwrap();
+            list.unbind().into_any()
         }
     }
 }
@@ -521,7 +525,7 @@ fn vec_f64_to_py(py: pyo3::Python, values: &[f64], return_type: JitReturnType) -
 #[cfg(feature = "pyo3")]
 #[allow(clippy::too_many_arguments)]
 fn execute_views(
-    py: pyo3::Python,
+    py: Python<'_>,
     entry: &JitEntry,
     f: extern "C" fn(*const f64) -> f64,
     loop_unroll: usize,
@@ -529,7 +533,7 @@ fn execute_views(
     len: usize,
     arg_count: usize,
     log_path: &'static str,
-) -> pyo3::PyResult<pyo3::PyObject> {
+) -> PyResult<Py<PyAny>> {
     log_unroll_exec_once(entry, len, loop_unroll, log_path);
     if let Some(lowered) = try_execute_lowered_vector_kernel(entry, views, len, loop_unroll) {
         log_lowered_exec_once(entry, len);
@@ -664,13 +668,13 @@ fn execute_views(
 
 #[cfg(feature = "pyo3")]
 fn try_exec_trailing_count(
-    py: pyo3::Python,
+    py: Python<'_>,
     entry: &JitEntry,
-    args: &pyo3::types::PyTuple,
+    args: &Bound<'_, pyo3::types::PyTuple>,
     f: extern "C" fn(*const f64) -> f64,
     loop_unroll: usize,
     arg_count: usize,
-) -> pyo3::PyResult<Option<pyo3::PyObject>> {
+) -> PyResult<Option<Py<PyAny>>> {
     if arg_count != entry.arg_count + 1 {
         return Ok(None);
     }
@@ -736,20 +740,20 @@ fn try_exec_trailing_count(
         )
     };
     let py_bytes = pyo3::types::PyBytes::new(py, byte_slice);
-    let array_mod = py.import("array")?;
+    let array_mod = py.import(pyo3::ffi::c_str!("array"))?;
     let array_obj = array_mod.getattr("array")?.call1(("d", py_bytes))?;
-    Ok(Some(array_obj.into_py(py)))
+    Ok(Some(array_obj.unbind()))
 }
 
 #[cfg(feature = "pyo3")]
 fn try_exec_profiled(
-    py: pyo3::Python,
+    py: Python<'_>,
     entry: &JitEntry,
-    args: &pyo3::types::PyTuple,
+    args: &Bound<'_, pyo3::types::PyTuple>,
     f: extern "C" fn(*const f64) -> f64,
     loop_unroll: usize,
     arg_count: usize,
-) -> pyo3::PyResult<Option<pyo3::PyObject>> {
+) -> PyResult<Option<Py<PyAny>>> {
     let Some(profile) = lookup_exec_profile(entry.func_ptr) else {
         return Ok(None);
     };
@@ -761,7 +765,7 @@ fn try_exec_profiled(
         } => {
             if arg_count == 1 && entry.arg_count == expected {
                 if let Ok(item) = args.get_item(0) {
-                    if let Some(view) = unsafe { open_typed_buffer(item) } {
+                    if let Some(view) = unsafe { open_typed_buffer(&item) } {
                         if view.elem_type == elem && view.len == expected {
                             if elem == BufferElemType::F64 && view.is_aligned_for_f64() {
                                 let res = f(view.as_ptr_f64());
@@ -791,7 +795,7 @@ fn try_exec_profiled(
                         matched = false;
                         break;
                     };
-                    let Some(view) = (unsafe { open_typed_buffer(item) }) else {
+                    let Some(view) = (unsafe { open_typed_buffer(&item) }) else {
                         matched = false;
                         break;
                     };
@@ -835,7 +839,7 @@ fn try_exec_profiled(
                     for (i, arg) in stack_args.iter_mut().enumerate().take(arg_count) {
                         let item = unsafe { pyo3::ffi::PyTuple_GetItem(args.as_ptr(), i as isize) };
                         let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
-                        if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
+                        if (val == -1.0) && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
                             unsafe { pyo3::ffi::PyErr_Clear() };
                             scalar_mismatch = true;
                             break;
@@ -855,15 +859,15 @@ fn try_exec_profiled(
 
 #[cfg(feature = "pyo3")]
 fn try_exec_single_packed_buffer(
-    py: pyo3::Python,
+    py: Python<'_>,
     entry: &JitEntry,
-    args: &pyo3::types::PyTuple,
+    args: &Bound<'_, pyo3::types::PyTuple>,
     f: extern "C" fn(*const f64) -> f64,
     arg_count: usize,
-) -> pyo3::PyResult<Option<pyo3::PyObject>> {
+) -> PyResult<Option<Py<PyAny>>> {
     if arg_count == 1 && entry.arg_count > 1 {
         if let Ok(item) = args.get_item(0) {
-            if let Some(view) = unsafe { open_typed_buffer(item) } {
+            if let Some(view) = unsafe { open_typed_buffer(&item) } {
                 let len = view.len;
                 if len == entry.arg_count {
                     let res = if view.elem_type == BufferElemType::F64 {
@@ -900,13 +904,13 @@ fn try_exec_single_packed_buffer(
 
 #[cfg(feature = "pyo3")]
 fn try_exec_vectorized_buffers(
-    py: pyo3::Python,
+    py: Python<'_>,
     entry: &JitEntry,
-    args: &pyo3::types::PyTuple,
+    args: &Bound<'_, pyo3::types::PyTuple>,
     f: extern "C" fn(*const f64) -> f64,
     loop_unroll: usize,
     arg_count: usize,
-) -> pyo3::PyResult<Option<pyo3::PyObject>> {
+) -> PyResult<Option<Py<PyAny>>> {
     if arg_count == entry.arg_count && arg_count > 0 {
         let mut views = Vec::with_capacity(arg_count);
         let mut common_len = None;
@@ -914,7 +918,7 @@ fn try_exec_vectorized_buffers(
 
         for i in 0..arg_count {
             if let Ok(item) = args.get_item(i) {
-                if let Some(view) = unsafe { open_typed_buffer(item) } {
+                if let Some(view) = unsafe { open_typed_buffer(&item) } {
                     let len = view.len;
                     if let Some(c_len) = common_len {
                         if len != c_len {
@@ -965,13 +969,13 @@ fn try_exec_vectorized_buffers(
 
 #[cfg(feature = "pyo3")]
 fn try_exec_sequence_fallback(
-    py: pyo3::Python,
+    py: Python<'_>,
     entry: &JitEntry,
-    args: &pyo3::types::PyTuple,
+    args: &Bound<'_, pyo3::types::PyTuple>,
     f: extern "C" fn(*const f64) -> f64,
     loop_unroll: usize,
     arg_count: usize,
-) -> pyo3::PyResult<Option<pyo3::PyObject>> {
+) -> PyResult<Option<Py<PyAny>>> {
     if arg_count == 1 && entry.arg_count == 1 {
         if let Ok(item) = args.get_item(0) {
             let is_text_like = item.is_instance_of::<pyo3::types::PyString>()
@@ -1039,19 +1043,19 @@ fn try_exec_sequence_fallback(
 
 #[cfg(feature = "pyo3")]
 fn try_exec_reduction_iterator(
-    py: pyo3::Python,
+    py: Python<'_>,
     entry: &JitEntry,
-    args: &pyo3::types::PyTuple,
+    args: &Bound<'_, pyo3::types::PyTuple>,
     f: extern "C" fn(*const f64) -> f64,
     arg_count: usize,
-) -> pyo3::PyResult<Option<pyo3::PyObject>> {
+) -> PyResult<Option<Py<PyAny>>> {
     if arg_count == 1 && entry.arg_count == 1 && entry.reduction != ReductionMode::None {
         if let Ok(item) = args.get_item(0) {
-            if let Ok(iter) = item.iter() {
+            if let Ok(iter) = item.try_iter() {
                 let mut acc = reduction_identity(entry.reduction);
                 let mut buf = [0.0_f64; 1];
                 for obj_res in iter {
-                    let obj = obj_res?;
+                    let obj: Bound<'_, PyAny> = obj_res?;
                     let val: f64 = obj.extract()?;
                     buf[0] = val;
                     let out = f(buf.as_ptr());
@@ -1068,12 +1072,12 @@ fn try_exec_reduction_iterator(
 
 #[cfg(feature = "pyo3")]
 fn exec_scalar_args(
-    py: pyo3::Python,
+    py: Python<'_>,
     entry: &JitEntry,
-    args: &pyo3::types::PyTuple,
+    args: &Bound<'_, pyo3::types::PyTuple>,
     f: extern "C" fn(*const f64) -> f64,
     arg_count: usize,
-) -> pyo3::PyResult<pyo3::PyObject> {
+) -> PyResult<Py<PyAny>> {
     if arg_count != entry.arg_count {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "wrong argument count for JIT function",
@@ -1104,10 +1108,10 @@ fn exec_scalar_args(
 #[cfg(feature = "pyo3")]
 #[inline(always)]
 pub fn execute_jit_func(
-    py: pyo3::Python,
+    py: Python<'_>,
     entry: &JitEntry,
-    args: &pyo3::types::PyTuple,
-) -> pyo3::PyResult<pyo3::PyObject> {
+    args: &Bound<'_, pyo3::types::PyTuple>,
+) -> PyResult<Py<PyAny>> {
     if entry.func_ptr == 0 {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(
             "JIT function pointer is invalid or not yet compiled",

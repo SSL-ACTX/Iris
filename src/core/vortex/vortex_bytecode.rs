@@ -46,16 +46,18 @@ pub fn verify_wordcode_bytes(raw: &[u8]) -> Result<(), VerifyError> {
     Ok(())
 }
 
-pub fn opcode_meta(py: Python) -> PyResult<OpcodeMeta> {
+pub fn opcode_meta(py: Python<'_>) -> PyResult<OpcodeMeta> {
     let meta = py.eval(
-        r#"
+        pyo3::ffi::c_str!(
+            r#"
 (lambda opcode: (
     opcode.opmap["EXTENDED_ARG"],
     list(getattr(opcode, "hasjabs", [])),
     list(getattr(opcode, "hasjrel", [])),
     [op for name, op in opcode.opmap.items() if "BACKWARD" in name],
 ))(__import__("opcode"))
-"#,
+"#
+        ),
         None,
         None,
     )?;
@@ -73,9 +75,10 @@ pub fn opcode_meta(py: Python) -> PyResult<OpcodeMeta> {
     })
 }
 
-pub fn quickening_support(py: Python) -> PyResult<QuickeningSupport> {
+pub fn quickening_support(py: Python<'_>) -> PyResult<QuickeningSupport> {
     let data = py.eval(
-        r#"
+        pyo3::ffi::c_str!(
+            r#"
 (lambda opcode: (
     opcode.opmap.get("CACHE", -1),
     (lambda raw_entries, opmap: (
@@ -94,16 +97,14 @@ pub fn quickening_support(py: Python) -> PyResult<QuickeningSupport> {
         ))([0] * 256)
     ))(getattr(opcode, "_inline_cache_entries", []), opcode.opmap),
 ))(__import__("opcode"))
-"#,
+"#
+        ),
         None,
         None,
     )?;
 
     let cache_raw: i32 = data.get_item(0)?.extract().unwrap_or(-1);
-    let entries: Vec<u16> = data
-        .get_item(1)
-        .and_then(|v| v.extract::<Vec<u16>>())
-        .unwrap_or_default();
+    let entries: Vec<u16> = data.get_item(1)?.extract::<Vec<u16>>().unwrap_or_default();
     let cache_opcode = if cache_raw >= 0 {
         Some(cache_raw as u8)
     } else {
@@ -402,8 +403,8 @@ pub fn validate_probe_compatibility(
 }
 
 pub fn read_exception_entries(
-    py: Python,
-    code: &PyAny,
+    _py: Python<'_>,
+    code: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<(usize, usize, usize, usize)>> {
     fn parse_varint(raw: &[u8], idx: &mut usize) -> Option<usize> {
         if *idx >= raw.len() {
@@ -423,14 +424,10 @@ pub fn read_exception_entries(
         Some(val)
     }
 
-    let raw: &[u8] = code
-        .getattr("co_exceptiontable")
-        .and_then(|v| v.extract::<&[u8]>())
-        .map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "vortex/exception-entries-bytes: {e}"
-            ))
-        })?;
+    let table_obj = code.getattr("co_exceptiontable")?;
+    let raw: &[u8] = table_obj.extract::<&[u8]>().map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/exception-entries-bytes: {e}"))
+    })?;
 
     let mut idx = 0usize;
     let mut out: Vec<(usize, usize, usize, usize)> = Vec::new();
@@ -455,7 +452,6 @@ pub fn read_exception_entries(
         out.push((start, end, depth, target));
     }
 
-    let _ = py;
     Ok(out)
 }
 
@@ -515,10 +511,10 @@ pub fn verify_exception_handler_targets(
 
 pub fn apply_isolation_transform(
     code: &[Instruction],
-    py: Python,
+    py: Python<'_>,
     disallowed_ops: Option<&std::collections::HashSet<u8>>,
 ) -> PyResult<Vec<Instruction>> {
-    let opcode = py.import("opcode")?;
+    let opcode = py.import(pyo3::ffi::c_str!("opcode"))?;
     let store_attr: u8 = opcode.getattr("opmap")?.get_item("STORE_ATTR")?.extract()?;
 
     if let Some(disallowed) = disallowed_ops {
@@ -553,30 +549,30 @@ pub fn verify_stacksize_minimum(stack_size: usize) -> Result<(), VerifyError> {
     Ok(())
 }
 
-pub fn probe_instructions(py: Python, extended_arg: u8) -> PyResult<Vec<Instruction>> {
+pub fn probe_instructions(py: Python<'_>, extended_arg: u8) -> PyResult<Vec<Instruction>> {
     let locals = PyDict::new(py);
     py.run(
-        r#"
+        pyo3::ffi::c_str!(
+            r#"
 def __iris_probe():
     _vortex_check()
 __iris_probe_code = __iris_probe.__code__
-"#,
+"#
+        ),
         None,
-        Some(locals),
+        Some(&locals),
     )?;
 
     let code = locals.get_item("__iris_probe_code")?.ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err("vortex/probe-code: missing result")
     })?;
 
-    let raw: &[u8] = code
-        .getattr("co_code")
-        .and_then(|v| v.extract::<&[u8]>())
-        .map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/probe-co_code: {e}"))
-        })?;
+    let co_code_obj = code.getattr("co_code")?;
+    let raw: &[u8] = co_code_obj.extract::<&[u8]>().map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/probe-co_code: {e}"))
+    })?;
 
-    let opmap = py.import("opcode")?.getattr("opmap")?;
+    let opmap = py.import(pyo3::ffi::c_str!("opcode"))?.getattr("opmap")?;
     let load_global: u8 = opmap.get_item("LOAD_GLOBAL")?.extract()?;
     let pop_top: u8 = opmap.get_item("POP_TOP")?.extract()?;
 
@@ -598,7 +594,7 @@ __iris_probe_code = __iris_probe.__code__
     Ok(decoded[start..=end].to_vec())
 }
 
-pub fn probe_raw_bytes(py: Python) -> PyResult<Vec<u8>> {
+pub fn probe_raw_bytes(py: Python<'_>) -> PyResult<Vec<u8>> {
     let ext = opcode_meta(py)?.extended_arg;
     let probe = probe_instructions(py, ext)?;
     Ok(encode_wordcode(&probe, ext))

@@ -9,12 +9,6 @@ use tokio::time::Duration;
 
 impl Runtime {
     pub fn is_alive(&self, pid: Pid) -> bool {
-        // proxies are normal actors so the slab check would cover them, but
-        // we also treat any registered proxy as alive even if its mailbox has
-        // been removed but the slab entry hasn't been cleaned up yet.
-        if self.remote_proxies.contains_key(&pid) {
-            return true;
-        }
         let slab = self.slab.lock().unwrap();
         slab.is_valid(pid)
     }

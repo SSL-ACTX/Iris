@@ -67,7 +67,7 @@ fn test_hook_enabled(py: Python<'_>, key: &str) -> bool {
         return false;
     }
     py.eval(
-        "__import__('os').environ.get(_iris_key, '0') == '1'",
+        pyo3::ffi::c_str!("__import__('os').environ.get(_iris_key, '0') == '1'"),
         None,
         Some(&locals),
     )
@@ -136,7 +136,7 @@ pub fn get_isolation_disallowed_ops() -> Vec<u8> {
 #[pyfunction]
 pub fn transmute_function(py: Python<'_>, py_func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     fn opcode_name(py: Python<'_>, op: u8) -> String {
-        py.import("opcode")
+        py.import(pyo3::ffi::c_str!("opcode"))
             .and_then(|m| m.getattr("opname"))
             .and_then(|names| names.get_item(op as usize))
             .and_then(|name| name.extract::<String>())
@@ -144,7 +144,11 @@ pub fn transmute_function(py: Python<'_>, py_func: &Bound<'_, PyAny>) -> PyResul
     }
 
     let py_minor: i32 = py
-        .eval_bound("__import__('sys').version_info.minor", None, None)
+        .eval(
+            pyo3::ffi::c_str!("__import__('sys').version_info.minor"),
+            None,
+            None,
+        )
         .and_then(|v| v.extract())
         .unwrap_or(99);
 
@@ -162,30 +166,27 @@ pub fn transmute_function(py: Python<'_>, py_func: &Bound<'_, PyAny>) -> PyResul
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/code: {e}")))?;
     let code_ptr = code.as_ptr() as usize;
     let raw: Bound<'_, PyBytes> = code
-        .getattr("co_code")
-        .and_then(|v| v.extract())
+        .getattr("co_code")?
+        .extract()
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/co_code: {e}")))?;
     let raw_bytes = raw.as_bytes();
-    let original_stack_size: usize = code
-        .getattr("co_stacksize")
-        .and_then(|v| v.extract())
-        .map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/co_stacksize: {e}"))
-        })?;
+    let original_stack_size: usize = code.getattr("co_stacksize")?.extract().map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/co_stacksize: {e}"))
+    })?;
 
     let globals_any = py_func
         .getattr("__globals__")
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals: {e}")))?;
-    let globals = globals_any.downcast::<PyDict>().map_err(|e| {
+    let globals = globals_any.cast::<PyDict>().map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals-cast: {e}"))
     })?;
     let local_mod = match py
-        .import_bound("sys")
+        .import(pyo3::ffi::c_str!("sys"))
         .and_then(|s| s.getattr("modules"))
         .and_then(|mods| mods.get_item("iris"))
     {
         Ok(m) => m,
-        Err(_) => match globals.get_item("iris")? {
+        _ => match globals.get_item("iris")? {
             Some(m) => m,
             None => {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -269,7 +270,7 @@ pub fn transmute_function(py: Python<'_>, py_func: &Bound<'_, PyAny>) -> PyResul
         return fallback_with_log(py, py_func, &fn_name, "stack depth invariant failed");
     }
 
-    let original_entries = match read_exception_entries(py, &code) {
+    let original_entries = match read_exception_entries(py, code.as_any()) {
         Ok(entries) => entries,
         Err(_) => {
             set_guard_telemetry(
@@ -577,7 +578,7 @@ pub fn transmute_function(py: Python<'_>, py_func: &Bound<'_, PyAny>) -> PyResul
         return fallback_with_log(py, py_func, &fn_name, "patched code too large");
     }
 
-    let kwargs = [("co_code", PyBytes::new(py, &final_raw))].into_py_dict(py);
+    let kwargs = [("co_code", PyBytes::new(py, &final_raw))].into_py_dict(py)?;
     let new_code = match code.call_method("replace", (), Some(&kwargs)) {
         Ok(v) => v,
         Err(_) => {
@@ -586,21 +587,8 @@ pub fn transmute_function(py: Python<'_>, py_func: &Bound<'_, PyAny>) -> PyResul
         }
     };
 
-    let patched_stack_size: usize = match new_code.getattr("co_stacksize").and_then(|v| v.extract())
-    {
-        Ok(v) => v,
-        Err(_) => {
-            set_guard_telemetry(
-                "fallback",
-                "patched_stack_metadata_unavailable",
-                py_minor,
-                true,
-                false,
-            );
-            return fallback_with_log(py, py_func, &fn_name, "patched stack metadata unavailable");
-        }
-    };
-    let patched_entries = match read_exception_entries(py, &new_code) {
+    let patched_stack_size: usize = new_code.getattr("co_stacksize")?.extract()?;
+    let patched_entries = match read_exception_entries(py, new_code.as_any()) {
         Ok(v) => v,
         Err(_) => {
             set_guard_telemetry(
@@ -641,7 +629,7 @@ pub fn transmute_function(py: Python<'_>, py_func: &Bound<'_, PyAny>) -> PyResul
         return fallback_with_log(py, py_func, &fn_name, "patched exception table invalid");
     }
 
-    let types_mod = match py.import("types") {
+    let types_mod = match py.import(pyo3::ffi::c_str!("types")) {
         Ok(v) => v,
         Err(_) => {
             set_guard_telemetry(
@@ -661,7 +649,7 @@ pub fn transmute_function(py: Python<'_>, py_func: &Bound<'_, PyAny>) -> PyResul
         // Isolation uses a detached globals dict so STORE_GLOBAL/STORE_NAME mutate only
         // this shadow environment, never the original module globals.
         py.run(
-            "isolated_globals = dict(base_globals)",
+            pyo3::ffi::c_str!("isolated_globals = dict(base_globals)"),
             None,
             Some(&locals2),
         )?;
@@ -670,7 +658,7 @@ pub fn transmute_function(py: Python<'_>, py_func: &Bound<'_, PyAny>) -> PyResul
             .ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("vortex/isolated-globals: missing result")
             })?
-            .downcast_into::<PyDict>()?
+            .cast_into::<PyDict>()?
     } else {
         globals.clone()
     };
@@ -725,7 +713,7 @@ fn fallback_shadow(
     let globals_any = py_func
         .getattr("__globals__")
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals: {e}")))?;
-    let globals = globals_any.downcast::<PyDict>().map_err(|e| {
+    let globals = globals_any.cast::<PyDict>().map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals-cast: {e}"))
     })?;
 
@@ -733,7 +721,8 @@ fn fallback_shadow(
     locals.set_item("fn", py_func)?;
     locals.set_item("isolation_mode", ISOLATION_MODE.load(Ordering::Relaxed))?;
     py.run(
-        r#"
+        pyo3::ffi::c_str!(
+            r#"
 def _iris_make_shadow(fn, isolation_mode=False):
     import types
     import sys
@@ -773,7 +762,8 @@ def _iris_make_shadow(fn, isolation_mode=False):
     return _wrapped
 
 shadow = _iris_make_shadow(fn, isolation_mode)
-"#,
+"#
+        ),
         Some(globals),
         Some(&locals),
     )

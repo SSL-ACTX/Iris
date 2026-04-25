@@ -36,6 +36,7 @@ enum MessageType {
     User = 0,
     Resolve = 1,
     Ping = 2,
+    PingPid = 3,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -45,6 +46,7 @@ impl TryFrom<u8> for MessageType {
             0 => Ok(MessageType::User),
             1 => Ok(MessageType::Resolve),
             2 => Ok(MessageType::Ping),
+            3 => Ok(MessageType::PingPid),
             _ => Err(()),
         }
     }
@@ -215,6 +217,14 @@ impl NetworkManager {
                 MessageType::Ping => {
                     Self::write_all_with_timeout(&mut write_half, &[3u8], io_timeout).await?;
                 }
+                MessageType::PingPid => {
+                    let mut pid_buf = [0u8; 8];
+                    Self::read_exact_with_timeout(&mut reader, &mut pid_buf, io_timeout).await?;
+                    let pid = u64::from_be_bytes(pid_buf);
+                    let alive = rt.is_alive(pid);
+                    let resp = if alive { 3u8 } else { 4u8 }; // 3=Pong, 4=Dead
+                    Self::write_all_with_timeout(&mut write_half, &[resp], io_timeout).await?;
+                }
             }
         }
         Ok(())
@@ -327,6 +337,8 @@ impl NetworkManager {
                     break;
                 }
 
+                let remote_pid = rt.remote_proxies.get(&pid).map(|e| e.value().1);
+
                 tokio::time::sleep(curr).await;
                 let io_timeout = rt.get_network_io_timeout();
 
@@ -339,19 +351,59 @@ impl NetworkManager {
                         )
                         .await
                         .is_ok()
-                            && Self::write_all_with_timeout(
-                                &mut stream,
-                                &[MessageType::Ping as u8],
-                                io_timeout,
-                            )
-                            .await
-                            .is_ok()
                         {
-                            let mut pong = [0u8; 1];
-                            Self::read_exact_with_timeout(&mut stream, &mut pong, io_timeout)
+                            if let Some(r_pid) = remote_pid {
+                                // Specific actor monitoring
+                                if Self::write_all_with_timeout(
+                                    &mut stream,
+                                    &[MessageType::PingPid as u8],
+                                    io_timeout,
+                                )
                                 .await
                                 .is_ok()
-                                && pong[0] == 3
+                                    && Self::write_all_with_timeout(
+                                        &mut stream,
+                                        &r_pid.to_be_bytes(),
+                                        io_timeout,
+                                    )
+                                    .await
+                                    .is_ok()
+                                {
+                                    let mut resp = [0u8; 1];
+                                    Self::read_exact_with_timeout(
+                                        &mut stream,
+                                        &mut resp,
+                                        io_timeout,
+                                    )
+                                    .await
+                                    .is_ok()
+                                        && resp[0] == 3 // 3=Pong (Alive)
+                                } else {
+                                    false
+                                }
+                            } else {
+                                // Generic node monitoring
+                                if Self::write_all_with_timeout(
+                                    &mut stream,
+                                    &[MessageType::Ping as u8],
+                                    io_timeout,
+                                )
+                                .await
+                                .is_ok()
+                                {
+                                    let mut pong = [0u8; 1];
+                                    Self::read_exact_with_timeout(
+                                        &mut stream,
+                                        &mut pong,
+                                        io_timeout,
+                                    )
+                                    .await
+                                    .is_ok()
+                                        && pong[0] == 3
+                                } else {
+                                    false
+                                }
+                            }
                         } else {
                             false
                         }

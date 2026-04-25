@@ -64,10 +64,10 @@ use crate::py::jit::codegen::{
 
 #[cfg(feature = "pyo3")]
 fn execute_registered_jit_guarded(
-    py: Python,
+    py: Python<'_>,
     func_key: usize,
-    args: &PyTuple,
-) -> Option<PyResult<PyObject>> {
+    args: &Bound<'_, PyTuple>,
+) -> Option<PyResult<Py<PyAny>>> {
     match catch_unwind(AssertUnwindSafe(|| {
         execute_registered_jit(py, func_key, args)
     })) {
@@ -87,7 +87,7 @@ struct OffloadTask {
     func: Py<PyAny>,
     args: Py<PyTuple>,
     kwargs: Option<Py<PyDict>>,
-    resp: std::sync::mpsc::Sender<Result<PyObject, PyErr>>,
+    resp: std::sync::mpsc::Sender<Result<Py<PyAny>, PyErr>>,
 }
 
 struct OffloadPool {
@@ -105,11 +105,13 @@ impl OffloadPool {
                     if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
                         break;
                     }
-                    Python::with_gil(|py| {
-                        let func = task.func.as_ref(py);
-                        let args = task.args.as_ref(py);
-                        let kwargs = task.kwargs.as_ref().map(|k: &Py<PyDict>| k.as_ref(py));
-                        let result = func.call(args, kwargs).map(|obj| obj.into_py(py));
+                    Python::attach(|py| {
+                        let func = task.func.bind(py);
+                        let args = task.args.bind(py);
+                        let kwargs = task.kwargs.as_ref().map(|k| k.bind(py));
+                        let result = func
+                            .call(args, kwargs.as_ref().map(|k| k.as_borrowed()).as_deref())
+                            .map(|obj| obj.unbind());
                         let _ = task.resp.send(result);
                     });
                 }
@@ -150,7 +152,7 @@ fn get_offload_strategy(func_key: usize) -> Option<String> {
 
 /// Initialize the Python submodule (called from `wrappers.populate_module`).
 #[cfg(feature = "pyo3")]
-pub(crate) fn init_py(m: &PyModule) -> PyResult<()> {
+pub(crate) fn init_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(register_offload, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(offload_call, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(call_jit, m)?)?;
@@ -338,7 +340,7 @@ fn get_quantum_cooldown() -> PyResult<(u64, u64)> {
 
 #[cfg(feature = "pyo3")]
 #[pyfunction]
-fn get_quantum_profile(func: PyObject) -> PyResult<Vec<(usize, f64, u64, u64)>> {
+fn get_quantum_profile(func: Py<PyAny>) -> PyResult<Vec<(usize, f64, u64, u64)>> {
     let key = func.as_ptr() as usize;
     let points = quantum_profile_snapshot(key).unwrap_or_default();
     Ok(points
@@ -349,7 +351,7 @@ fn get_quantum_profile(func: PyObject) -> PyResult<Vec<(usize, f64, u64, u64)>> 
 
 #[cfg(feature = "pyo3")]
 #[pyfunction]
-fn seed_quantum_profile(func: PyObject, rows: Vec<(usize, f64, u64, u64)>) -> PyResult<bool> {
+fn seed_quantum_profile(func: Py<PyAny>, rows: Vec<(usize, f64, u64, u64)>) -> PyResult<bool> {
     let key = func.as_ptr() as usize;
     let seeds = rows
         .into_iter()
@@ -366,13 +368,14 @@ fn seed_quantum_profile(func: PyObject, rows: Vec<(usize, f64, u64, u64)>) -> Py
 /// Register a Python function for offloading.
 #[cfg(feature = "pyo3")]
 #[pyfunction]
+#[pyo3(signature = (func, strategy=None, return_type=None, source_expr=None, arg_names=None))]
 fn register_offload(
-    func: PyObject,
+    func: Py<PyAny>,
     strategy: Option<String>,
     return_type: Option<String>,
     source_expr: Option<String>,
     arg_names: Option<Vec<String>>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let key = func.as_ptr() as usize;
     if let Some(ref s) = strategy {
         set_offload_strategy(key, s);
@@ -380,8 +383,8 @@ fn register_offload(
             let _ = get_offload_pool();
         } else if s == "jit" {
             if let (Some(expr), Some(args)) = (source_expr.clone(), arg_names.clone()) {
-                let func_name = Python::with_gil(|py| {
-                    func.as_ref(py)
+                let func_name = Python::attach(|py| {
+                    func.bind(py)
                         .getattr("__name__")
                         .ok()
                         .and_then(|n| n.extract::<String>().ok())
@@ -579,12 +582,13 @@ fn register_offload(
 /// Execute a Python callable on the offload actor pool, blocking until result.
 #[cfg(feature = "pyo3")]
 #[pyfunction]
+#[pyo3(signature = (func, args, kwargs=None))]
 fn offload_call(
-    py: Python,
-    func: PyObject,
-    args: &PyTuple,
-    kwargs: Option<&PyDict>,
-) -> PyResult<PyObject> {
+    py: Python<'_>,
+    func: Py<PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     let key = func.as_ptr() as usize;
     let use_jit = !matches!(get_offload_strategy(key).as_deref(), Some("actor"));
     if use_jit {
@@ -607,9 +611,9 @@ fn offload_call(
 
     let (tx, rx) = std::sync::mpsc::channel();
     let task = OffloadTask {
-        func: func.into_py(py),
-        args: args.into_py(py),
-        kwargs: kwargs.map(|d: &PyDict| d.into_py(py)),
+        func: func.clone_ref(py),
+        args: args.clone().unbind(),
+        kwargs: kwargs.map(|d| d.clone().unbind()),
         resp: tx,
     };
 
@@ -617,7 +621,7 @@ fn offload_call(
         .send(task)
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("offload queue closed"))?;
 
-    py.allow_threads(move || match rx.recv() {
+    py.detach(move || match rx.recv() {
         Ok(res) => res,
         Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
             "offload task canceled",
@@ -628,12 +632,13 @@ fn offload_call(
 /// Directly invoke the JIT-compiled version of a Python function.
 #[cfg(feature = "pyo3")]
 #[pyfunction]
+#[pyo3(signature = (func, args, _kwargs=None))]
 fn call_jit(
-    py: Python,
-    func: PyObject,
-    args: &PyTuple,
-    _kwargs: Option<&PyDict>,
-) -> PyResult<PyObject> {
+    py: Python<'_>,
+    func: Py<PyAny>,
+    args: &Bound<'_, PyTuple>,
+    _kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     let key = func.as_ptr() as usize;
     if let Some(res) = execute_registered_jit_guarded(py, key, args) {
         return res;
@@ -649,7 +654,7 @@ fn call_jit(
 /// crossing overhead on each iteration.
 #[cfg(feature = "pyo3")]
 #[pyfunction]
-fn call_jit_step_loop_f64(func: PyObject, seed: f64, count: usize) -> PyResult<f64> {
+fn call_jit_step_loop_f64(func: Py<PyAny>, seed: f64, count: usize) -> PyResult<f64> {
     let key = func.as_ptr() as usize;
     let entry = lookup_jit(key)
         .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("no JIT entry found"))?;

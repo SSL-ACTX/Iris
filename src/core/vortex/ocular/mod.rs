@@ -9,9 +9,8 @@ pub use callbacks::{
 };
 
 use pyo3::prelude::*;
-use pyo3::wrap_pyfunction;
 
-pub fn init_py(m: &PyModule) -> PyResult<()> {
+pub fn init_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(start_tracing, m)?)?;
     m.add_function(wrap_pyfunction!(stop_tracing, m)?)?;
     m.add_function(wrap_pyfunction!(instruction_callback, m)?)?;

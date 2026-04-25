@@ -1,11 +1,12 @@
-use pyo3::prelude::*;
+use pyo3::types::PyAny;
+use pyo3::Py;
 use std::collections::HashMap;
 
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum TraceEvent {
     PyStart {
-        code: Option<PyObject>,
+        code: Option<Py<PyAny>>,
         code_ptr: usize,
         lasti: i32,
         ts: u64,
@@ -41,7 +42,7 @@ pub struct InstMeta {
 
 pub struct CodeMeta {
     pub name: String,
-    pub code_obj: PyObject,
+    pub code_obj: Py<PyAny>,
     pub base_opcodes: HashMap<i32, InstMeta>,
     pub valid_offsets: Vec<i32>,
     pub filename: String,

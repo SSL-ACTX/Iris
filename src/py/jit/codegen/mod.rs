@@ -47,10 +47,10 @@ pub(crate) fn jit_dump_clif_enabled() -> bool {
 
 #[cfg(feature = "pyo3")]
 pub fn execute_registered_jit(
-    py: pyo3::Python,
+    py: pyo3::Python<'_>,
     func_key: usize,
-    args: &pyo3::types::PyTuple,
-) -> Option<pyo3::PyResult<pyo3::PyObject>> {
+    args: &pyo3::Bound<'_, pyo3::types::PyTuple>,
+) -> Option<pyo3::PyResult<pyo3::Py<pyo3::PyAny>>> {
     if crate::py::jit::quantum_speculation_enabled() {
         if let Some(map) = QUANTUM_REGISTRY.get() {
             let (entry, idx, fallback_entries, should_use_quantum, active_count) = {

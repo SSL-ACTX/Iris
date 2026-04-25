@@ -69,7 +69,7 @@ assert speedup > 1.0, f"send_many was not faster (speedup={speedup:.2f}x)"
 bench_speedup = speedup
 "#
             ),
-            None,
+            Some(&locals),
             Some(&locals),
         )
         .unwrap();

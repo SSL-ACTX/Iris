@@ -1,6 +1,7 @@
 // src/py/jit/codegen/buffer.rs
 
 use crate::py::jit::codegen::BufferElemType;
+use pyo3::prelude::*;
 use std::ffi::CStr;
 
 // helper for zero-copy buffer access used by the JIT runner
@@ -23,7 +24,7 @@ impl BufferView {
 
     #[inline(always)]
     pub(crate) fn is_aligned_for_f64(&self) -> bool {
-        (self.view.buf as usize).is_multiple_of(std::mem::align_of::<f64>())
+        (self.view.buf as usize).wrapping_rem(std::mem::align_of::<f64>()) == 0
     }
 }
 
@@ -112,7 +113,7 @@ pub(crate) unsafe fn parse_buffer_elem_type(view: &pyo3::ffi::Py_buffer) -> Opti
 }
 
 #[cfg(feature = "pyo3")]
-pub(crate) unsafe fn open_typed_buffer(obj: &pyo3::PyAny) -> Option<BufferView> {
+pub(crate) unsafe fn open_typed_buffer(obj: &Bound<'_, PyAny>) -> Option<BufferView> {
     let mut view: pyo3::ffi::Py_buffer = std::mem::zeroed();
     let flags = pyo3::ffi::PyBUF_C_CONTIGUOUS | pyo3::ffi::PyBUF_FORMAT;
     if pyo3::ffi::PyObject_GetBuffer(obj.as_ptr(), &mut view, flags) != 0 {

@@ -9,7 +9,7 @@ async fn test_phase7_complex_orchestration() {
     let (rt_a, pid_a) = Python::attach(|py| {
         let module = iris::py::make_module(py).expect("make_module");
         let rt = module.getattr("PyRuntime").unwrap().call0().unwrap();
-        rt.call_method1("start_server", (addr,)).unwrap();
+        rt.call_method1("listen", (addr,)).unwrap();
 
         py.run(pyo3::ffi::c_str!("def handler(msg): pass"), None, None)
             .unwrap();

@@ -7,7 +7,6 @@ use crate::vortex::ocular::state::{
 use crate::vortex::ocular::telemetry::telemetry_worker;
 use crossbeam_queue::ArrayQueue;
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
@@ -16,7 +15,7 @@ use std::thread;
 
 const BATCH_SIZE: usize = 1024;
 
-static DISABLE_OBJ: OnceLock<PyObject> = OnceLock::new();
+static DISABLE_OBJ: OnceLock<Py<PyAny>> = OnceLock::new();
 
 thread_local! {
     static LOCAL_BATCH: RefCell<Vec<TraceEvent>> = RefCell::new(Vec::with_capacity(BATCH_SIZE));
@@ -128,7 +127,11 @@ fn enqueue_event(event: TraceEvent) {
 }
 
 #[pyfunction]
-pub fn instruction_callback(py: Python<'_>, code: &PyAny, instruction_offset: i32) -> PyObject {
+pub fn instruction_callback(
+    py: Python<'_>,
+    code: &Bound<'_, PyAny>,
+    instruction_offset: i32,
+) -> Py<PyAny> {
     let code_ptr = code.as_ptr() as usize;
     let trace_allowed = match code_ptr_allowed(code_ptr) {
         Some(allowed) => allowed,
@@ -146,7 +149,7 @@ pub fn instruction_callback(py: Python<'_>, code: &PyAny, instruction_offset: i3
     };
 
     if !trace_allowed {
-        return py.None().to_object(py);
+        return py.None();
     }
 
     enqueue_event(TraceEvent::Instruction {
@@ -173,11 +176,11 @@ pub fn instruction_callback(py: Python<'_>, code: &PyAny, instruction_offset: i3
         }
     }
 
-    py.None().to_object(py)
+    py.None()
 }
 
 #[pyfunction]
-pub fn py_start_callback(code: &PyAny, instruction_offset: i32) {
+pub fn py_start_callback(code: &Bound<'_, PyAny>, instruction_offset: i32) {
     let ts = get_ts();
     let code_ptr = code.as_ptr() as usize;
 
@@ -201,14 +204,12 @@ pub fn py_start_callback(code: &PyAny, instruction_offset: i32) {
         return;
     }
 
-    let code_opt = Python::with_gil(|py| {
-        SEEN_CODE_PTRS.with(|seen| {
-            if seen.borrow_mut().insert(code_ptr) {
-                Some(code.to_object(py))
-            } else {
-                None
-            }
-        })
+    let code_opt = SEEN_CODE_PTRS.with(|seen| {
+        if seen.borrow_mut().insert(code_ptr) {
+            Some(code.clone().unbind())
+        } else {
+            None
+        }
     });
 
     enqueue_event(TraceEvent::PyStart {
@@ -223,10 +224,10 @@ pub fn py_start_callback(code: &PyAny, instruction_offset: i32) {
 #[pyfunction]
 pub fn jump_callback(
     py: Python<'_>,
-    code: &PyAny,
+    code: &Bound<'_, PyAny>,
     instruction_offset: i32,
     destination_offset: i32,
-) -> PyObject {
+) -> Py<PyAny> {
     let ts = get_ts();
     let code_ptr = code.as_ptr() as usize;
 
@@ -246,7 +247,7 @@ pub fn jump_callback(
     };
 
     if !trace_allowed {
-        return py.None().to_object(py);
+        return py.None();
     }
 
     enqueue_event(TraceEvent::Jump {
@@ -275,11 +276,15 @@ pub fn jump_callback(
         }
     }
 
-    py.None().to_object(py)
+    py.None()
 }
 
 #[pyfunction]
-pub fn py_return_callback(code: &PyAny, _instruction_offset: i32, _retval: &PyAny) {
+pub fn py_return_callback(
+    code: &Bound<'_, PyAny>,
+    _instruction_offset: i32,
+    _retval: &Bound<'_, PyAny>,
+) {
     let code_ptr = code.as_ptr() as usize;
 
     let trace_allowed = match code_ptr_allowed(code_ptr) {
@@ -310,14 +315,14 @@ pub fn py_return_callback(code: &PyAny, _instruction_offset: i32, _retval: &PyAn
 }
 
 #[pyfunction]
-pub fn get_tracing_stats(py: Python<'_>) -> PyResult<PyObject> {
+pub fn get_tracing_stats(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let summary = crate::vortex::ocular::state::get_summary();
     let out = pyo3::types::PyDict::new(py);
     out.set_item("processed_events", summary.processed_events)?;
     out.set_item("instruction_events", summary.instruction_events)?;
     out.set_item("unique_instruction_sites", summary.unique_instruction_sites)?;
     out.set_item("loop_trace_count", summary.loop_trace_count)?;
-    Ok(out.to_object(py))
+    Ok(out.unbind().into_any())
 }
 
 #[pyfunction]
@@ -328,7 +333,7 @@ pub fn is_tracing_active() -> bool {
 #[pyfunction]
 #[pyo3(signature = (mode="precise", deinstrument_threshold=0, exclude=None, include_only=None))]
 pub fn start_tracing(
-    py: Python,
+    py: Python<'_>,
     mode: &str,
     deinstrument_threshold: u32,
     exclude: Option<Vec<String>>,
@@ -358,18 +363,18 @@ pub fn start_tracing(
         }
     }
 
-    let sys = py.import("sys")?;
+    let sys = py.import(pyo3::ffi::c_str!("sys"))?;
     let sys_mon = sys.getattr("monitoring")?;
 
     DISABLE_OBJ.get_or_init(|| {
         sys_mon
             .getattr("DISABLE")
-            .map(|o| o.to_object(py))
-            .unwrap_or_else(|_| py.None().to_object(py))
+            .map(|o| o.unbind())
+            .unwrap_or_else(|_| py.None())
     });
 
     let tool_id = sys_mon.getattr("DEBUGGER_ID")?;
-    let tool_id_obj = tool_id.to_object(py);
+    let tool_id_obj = tool_id.clone().unbind();
     sys_mon.call_method0("restart_events")?;
     sys_mon.call_method1("use_tool_id", (tool_id_obj.clone_ref(py), "ocular"))?;
 
@@ -380,57 +385,65 @@ pub fn start_tracing(
     let branch_event = events.getattr("BRANCH")?;
     let py_return_event = events.getattr("PY_RETURN")?;
 
-    let start_cb = pyo3::wrap_pyfunction!(py_start_callback)(py)?;
+    // We can use a dummy module or the parent module here for wrap_pyfunction.
+    // However, since we are inside a function and just need a PyFunction,
+    // we can use wrap_pyfunction! with the current python handle's module?
+    // Actually, in 0.28, we can just use Bound::new(py, PyFunction::...) or similar.
+    // But the easiest way is to use wrap_pyfunction! and provide a Bound<PyModule>.
+    // Since we don't have one here, we'll create a temporary one.
+    let m = PyModule::new(py, "ocular_internal")?;
+
+    let start_cb = pyo3::wrap_pyfunction!(py_start_callback, &m)?;
     sys_mon.call_method1(
         "register_callback",
         (
             tool_id_obj.clone_ref(py),
-            py_start_event.to_object(py),
+            py_start_event.clone().unbind(),
             start_cb,
         ),
     )?;
 
-    let jump_cb = pyo3::wrap_pyfunction!(jump_callback)(py)?;
-    let jump_cb_obj = jump_cb.to_object(py);
+    let jump_cb = pyo3::wrap_pyfunction!(jump_callback, &m)?;
+    let jump_cb_obj = jump_cb.clone().unbind();
     sys_mon.call_method1(
         "register_callback",
         (
             tool_id_obj.clone_ref(py),
-            jump_event.to_object(py),
-            jump_cb_obj,
+            jump_event.clone().unbind(),
+            jump_cb_obj.clone_ref(py),
         ),
     )?;
     sys_mon.call_method1(
         "register_callback",
         (
             tool_id_obj.clone_ref(py),
-            branch_event.to_object(py),
+            branch_event.clone().unbind(),
             jump_cb,
         ),
     )?;
 
-    let return_cb = pyo3::wrap_pyfunction!(py_return_callback)(py)?;
+    let return_cb = pyo3::wrap_pyfunction!(py_return_callback, &m)?;
     sys_mon.call_method1(
         "register_callback",
         (
             tool_id_obj.clone_ref(py),
-            py_return_event.to_object(py),
+            py_return_event.clone().unbind(),
             return_cb,
         ),
     )?;
 
-    let mut combined_events = py_start_event.extract::<i32>()?
+    let mut combined_events: i32 = py_start_event.extract::<i32>()?
         | jump_event.extract::<i32>()?
         | branch_event.extract::<i32>()?
         | py_return_event.extract::<i32>()?;
 
     if is_precise {
-        let inst_cb = pyo3::wrap_pyfunction!(instruction_callback)(py)?;
+        let inst_cb = pyo3::wrap_pyfunction!(instruction_callback, &m)?;
         sys_mon.call_method1(
             "register_callback",
             (
                 tool_id_obj.clone_ref(py),
-                instruction_event.to_object(py),
+                instruction_event.clone().unbind(),
                 inst_cb,
             ),
         )?;
@@ -440,7 +453,7 @@ pub fn start_tracing(
             "register_callback",
             (
                 tool_id_obj.clone_ref(py),
-                instruction_event.to_object(py),
+                instruction_event.clone().unbind(),
                 py.None(),
             ),
         )?;
@@ -452,11 +465,11 @@ pub fn start_tracing(
 }
 
 #[pyfunction]
-pub fn stop_tracing(py: Python) -> PyResult<()> {
-    let sys = py.import("sys")?;
+pub fn stop_tracing(py: Python<'_>) -> PyResult<()> {
+    let sys = py.import(pyo3::ffi::c_str!("sys"))?;
     let sys_mon = sys.getattr("monitoring")?;
     let tool_id = sys_mon.getattr("DEBUGGER_ID")?;
-    let tool_id_obj = tool_id.to_object(py);
+    let tool_id_obj = tool_id.clone().unbind();
 
     let events = sys_mon.getattr("events")?;
     let instruction_event = events.getattr("INSTRUCTION")?;
@@ -512,7 +525,7 @@ pub fn stop_tracing(py: Python) -> PyResult<()> {
     if IS_RUNNING.swap(false, Ordering::Relaxed) {
         if let Ok(mut thread_guard) = WORKER_THREAD.lock() {
             if let Some(handle) = thread_guard.take() {
-                py.allow_threads(|| {
+                py.detach(|| {
                     let _ = handle.join();
                 });
             }

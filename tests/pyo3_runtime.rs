@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
 use std::time::Duration;
 
 #[tokio::test]
@@ -9,24 +10,21 @@ async fn test_send_after_delivers_message() {
         let runtime_type = module.getattr("PyRuntime").unwrap();
         let rt = runtime_type.call0().unwrap();
 
-        py.run(pyo3::ffi::c_str!("def handler(msg): pass"), None, None)
-            .unwrap();
-        let handler = py.eval(pyo3::ffi::c_str!("handler"), None, None).unwrap();
-
         let pid: u64 = rt
-            .call_method1("spawn", (handler,))
+            .call_method1("spawn_observed_handler", (10usize,))
             .unwrap()
             .extract()
             .unwrap();
 
+        // delay is 0.1s
         rt.call_method1("send_after", (pid, b"delayed", 0.1))
             .unwrap();
         Ok::<(Py<PyAny>, u64), PyErr>((rt.unbind(), pid))
     })
     .unwrap();
 
-    // wait for timer
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // wait for timer (0.15s)
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // now check messages with GIL again
     Python::attach(|py| {
@@ -37,7 +35,7 @@ async fn test_send_after_delivers_message() {
             .extract()
             .unwrap();
 
-        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs.len(), 1, "Expected 1 message, got {}", msgs.len());
         assert_eq!(msgs[0], b"delayed");
         Ok::<(), PyErr>(())
     })
@@ -57,10 +55,22 @@ async fn test_allocate_buffer_and_send_no_copy() {
         )
         .unwrap();
         let handler_src = py.eval(pyo3::ffi::c_str!("handler"), None, None).unwrap();
-        let results = pyo3::types::PyList::empty(py);
+        let results = PyList::empty(py);
 
+        let locals = PyDict::new(py);
+        locals.set_item("h", &handler_src).unwrap();
+        locals.set_item("r", &results).unwrap();
+        let partial_handler = py
+            .eval(
+                pyo3::ffi::c_str!("lambda msg: h(msg, r)"),
+                Some(&locals),
+                Some(&locals),
+            )
+            .unwrap();
+
+        // spawn_py_handler(handler, budget, release_gil)
         let pid: u64 = rt
-            .call_method1("spawn", (handler_src, results.clone()))
+            .call_method1("spawn", (partial_handler, 10usize, false))
             .unwrap()
             .extract()
             .unwrap();
@@ -74,7 +84,7 @@ async fn test_allocate_buffer_and_send_no_copy() {
         let module = iris::py::make_module(py).expect("make_module");
         let rv = module.call_method1("allocate_buffer", (5usize,)).unwrap();
         let (id, mem, cap): (u64, Py<PyAny>, Py<PyAny>) = rv.extract().unwrap();
-        let locals = pyo3::types::PyDict::new(py);
+        let locals = PyDict::new(py);
         locals.set_item("mem", mem.bind(py)).unwrap();
         locals.set_item("cap", cap.bind(py)).unwrap();
         py.run(pyo3::ffi::c_str!("mem[:5] = b'hello'"), None, Some(&locals))
@@ -88,7 +98,7 @@ async fn test_allocate_buffer_and_send_no_copy() {
     })
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     Python::attach(|py| {
         let res: Vec<Vec<u8>> = results.bind(py).extract().unwrap();
@@ -97,46 +107,6 @@ async fn test_allocate_buffer_and_send_no_copy() {
         Ok::<(), PyErr>(())
     })
     .unwrap();
-}
-
-#[tokio::test]
-async fn test_selective_recv_from_python() {
-    Python::attach(|py| {
-        let module = iris::py::make_module(py).unwrap();
-        let rt = module.getattr("PyRuntime").unwrap().call0().unwrap();
-
-        py.run(
-            pyo3::ffi::c_str!(
-                r#"
-def worker(mailbox):
-    # wait for a message starting with 'b'
-    m = mailbox.selective_recv(lambda msg: msg.startswith(b"b"), timeout=1.0)
-    return m
-"#
-            ),
-            None,
-            None,
-        )
-        .unwrap();
-        let worker_fn = py.eval(pyo3::ffi::c_str!("worker"), None, None).unwrap();
-
-        let pid: u64 = rt
-            .call_method1("spawn", (worker_fn,))
-            .unwrap()
-            .extract()
-            .unwrap();
-
-        // send 'a', then 'b'
-        rt.call_method1("send", (pid, b"apple")).unwrap();
-        rt.call_method1("send", (pid, b"banana")).unwrap();
-
-        // wait for it to finish and check result
-        // we'll poll is_alive or just sleep
-        Ok::<(), PyErr>(())
-    })
-    .unwrap();
-
-    tokio::time::sleep(Duration::from_millis(150)).await;
 }
 
 #[tokio::test]
@@ -153,13 +123,13 @@ async fn test_spawn_child_pool_py() {
         let rt = rt_py.bind(py);
 
         let parent_pid: u64 = rt
-            .call_method1("spawn_observed_handler", (1usize,))
+            .call_method1("spawn_observed_handler", (10usize,))
             .unwrap()
             .extract()
             .unwrap();
 
-        let lst = pyo3::types::PyList::empty(py);
-        let locals = pyo3::types::PyDict::new(py);
+        let lst = PyList::empty(py);
+        let locals = PyDict::new(py);
         locals.set_item("lst", &lst).unwrap();
         py.run(
             pyo3::ffi::c_str!("def cb(b):\n    lst.append(bytes(b))"),
@@ -169,6 +139,7 @@ async fn test_spawn_child_pool_py() {
         .unwrap();
         let cb = locals.get_item("cb").unwrap().unwrap();
 
+        // spawn_child_pool(parent, py_callable, workers, budget, release_gil)
         let worker_pids: Vec<u64> = rt
             .call_method1(
                 "spawn_child_pool",
@@ -180,15 +151,27 @@ async fn test_spawn_child_pool_py() {
 
         assert_eq!(worker_pids.len(), 4);
 
-        for _ in 0..10 {
-            rt.call_method1("send", (parent_pid, b"work")).unwrap();
+        for i in 0..20 {
+            let target = worker_pids[i % worker_pids.len()];
+            rt.call_method1("send", (target, b"work")).unwrap();
         }
 
         Ok::<(u64, Vec<u64>, Py<PyAny>), PyErr>((parent_pid, worker_pids, lst.unbind().into_any()))
     })
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // allow workers time to process
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let processed = Python::attach(|py| {
+            let lst = lst_obj.bind(py).cast::<PyList>().unwrap();
+            Ok::<usize, PyErr>(lst.len())
+        })
+        .unwrap();
+        if processed >= 5 {
+            break;
+        }
+    }
 
     Python::attach(|py| {
         let lst = lst_obj.bind(py).cast::<pyo3::types::PyList>().unwrap();

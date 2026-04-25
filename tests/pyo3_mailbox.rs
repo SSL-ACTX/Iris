@@ -173,7 +173,7 @@ time.sleep(0.5)
 
 #[tokio::test]
 async fn test_exit_reason_on_panic() {
-    Python::attach(|py| {
+    let (rt_py, observer) = Python::attach(|py| {
         let module = iris::py::make_module(py).unwrap();
         let rt = module.getattr("PyRuntime").unwrap().call0().unwrap();
 
@@ -197,42 +197,51 @@ async fn test_exit_reason_on_panic() {
         // Stop the target actor (normal exit)
         rt.call_method1("stop", (target,)).unwrap();
 
-        // Give a small delay for the exit to be delivered
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        Ok::<(Py<PyAny>, u64), PyErr>((rt.unbind(), observer))
+    })
+    .unwrap();
 
-        let msgs: Vec<Py<PyAny>> = rt
-            .call_method1("get_messages", (observer,))
-            .unwrap()
-            .extract()
-            .unwrap();
+    // Give a delay for the exit to be delivered
+    let mut found = false;
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        found = Python::attach(|py| {
+            let rt = rt_py.bind(py);
+            let msgs: Vec<Py<PyAny>> = rt
+                .call_method1("get_messages", (observer,))
+                .unwrap()
+                .extract()
+                .unwrap();
 
-        // Find an EXIT message with reason 'normal'
-        let mut found = false;
-        for m in msgs {
-            let m_bound = m.bind(py);
-            if let Ok(type_name_obj) = m_bound.getattr("type_name") {
-                let type_name: String = type_name_obj.extract().unwrap_or_default();
-                if type_name == "EXIT" {
-                    let reason: String = m_bound
-                        .getattr("reason")
-                        .unwrap()
-                        .extract()
-                        .unwrap_or_default();
-                    if reason == "normal" {
-                        found = true;
-                        break;
+            // Find an EXIT message with reason 'normal'
+            for m in msgs {
+                let m_bound: &Bound<'_, PyAny> = m.bind(py);
+                if let Ok(type_name_obj) = m_bound.getattr("type_name") {
+                    let type_name: String = type_name_obj.extract::<String>().unwrap_or_default();
+                    if type_name == "EXIT" {
+                        let reason: String = m_bound
+                            .getattr("reason")
+                            .unwrap()
+                            .extract::<String>()
+                            .unwrap_or_default();
+                        if reason == "normal" {
+                            return Ok::<bool, PyErr>(true);
+                        }
                     }
                 }
             }
+            Ok::<bool, PyErr>(false)
+        })
+        .unwrap();
+        if found {
+            break;
         }
+    }
 
-        assert!(
-            found,
-            "expected to find an EXIT message with reason 'normal'"
-        );
-        Ok::<(), PyErr>(())
-    })
-    .unwrap();
+    assert!(
+        found,
+        "expected to find an EXIT message with reason 'normal'"
+    );
 }
 
 // tests/pyo3_release_gil.rs

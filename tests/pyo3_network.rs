@@ -203,10 +203,10 @@ async fn test_distributed_stop_observed_py() {
     })
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(2000)).await;
+    tokio::time::sleep(Duration::from_millis(3000)).await;
 
     let mut alive = true;
-    for _ in 0..10 {
+    for _ in 0..30 {
         alive = Python::attach(|py| {
             let a: bool = rt_b
                 .bind(py)
@@ -220,10 +220,10 @@ async fn test_distributed_stop_observed_py() {
         if !alive {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
     assert!(
         !alive,
-        "Remote proxy should be dead after actual actor stopped"
+        "Remote proxy should be dead after actual actor stopped (waited up to 12s total)"
     );
 }

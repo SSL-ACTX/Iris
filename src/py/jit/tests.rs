@@ -10,6 +10,9 @@ use crate::py::jit::codegen::{
 };
 use cranelift::prelude::settings;
 use cranelift::prelude::Configurable;
+// use pyo3::prelude::*;
+use pyo3::types::PyTuple;
+use pyo3::IntoPyObjectExt;
 
 // Don't ever regress next time :(
 fn quantum_shared_test_lock() -> &'static std::sync::Mutex<()> {
@@ -46,13 +49,14 @@ fn compile_jit_int_return() {
     let entry = compile_jit_with_return_type("x + 1", &args, JitReturnType::Int).unwrap();
     register_jit(999_999, entry.clone());
 
-    pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| {
-        let tup = pyo3::types::PyTuple::new(py, [1.0_f64]);
-        let obj = execute_jit_func(py, &entry, tup).unwrap();
-        let val: i64 = obj.extract(py).unwrap();
+    Python::attach(|py| {
+        let tup = pyo3::types::PyTuple::new(py, [1.0_f64]).unwrap();
+        let obj = execute_jit_func(py, &entry, &tup).unwrap();
+        let val: i64 = obj.bind(py).extract().unwrap();
         assert_eq!(val, 2);
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 }
 
 #[test]
@@ -549,13 +553,14 @@ fn quantum_speculation_logs_choice_when_slow() {
     let func_key = 12345;
     register_quantum_jit(func_key, entries);
 
-    pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| {
-        let tup = pyo3::types::PyTuple::new(py, [1.0_f64]);
-        let res = execute_registered_jit(py, func_key, tup).unwrap().unwrap();
-        let out: f64 = res.extract(py).unwrap();
+    Python::attach(|py| {
+        let tup = pyo3::types::PyTuple::new(py, [1.0_f64]).unwrap();
+        let res = execute_registered_jit(py, func_key, &tup).unwrap().unwrap();
+        let out: f64 = res.bind(py).extract().unwrap();
         assert_eq!(out, 2.0);
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 
     let logged = logs.lock().unwrap();
     assert!(logged
@@ -594,24 +599,25 @@ fn quantum_first_run_vector_container_reduction_executes() {
     let func_key = 123_456_789;
     register_quantum_jit(func_key, entries);
 
-    pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let locals = pyo3::types::PyDict::new(py);
         py.run(
-            "from array import array\nxs = array('d', [1.0, 2.0, 3.0, 4.0])",
+            pyo3::ffi::c_str!("from array import array\nxs = array('d', [1.0, 2.0, 3.0, 4.0])"),
             None,
-            Some(locals),
+            Some(&locals),
         )
         .unwrap();
 
-        let xs = locals.get_item("xs").unwrap();
-        let tuple = pyo3::types::PyTuple::new(py, [xs]);
-        let out_obj = execute_registered_jit(py, func_key, tuple)
+        let xs = locals.get_item("xs").unwrap().unwrap();
+        let tuple = pyo3::types::PyTuple::new(py, [xs]).unwrap();
+        let out_obj = execute_registered_jit(py, func_key, &tuple)
             .expect("quantum dispatcher should return a result")
             .expect("quantum first-run execution should succeed");
-        let out: f64 = out_obj.extract(py).unwrap();
+        let out: f64 = out_obj.bind(py).extract().unwrap();
         assert_eq!(out, 30.0);
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 
     env::remove_var("IRIS_JIT_QUANTUM");
     reset_quantum_control_state();
@@ -643,34 +649,37 @@ fn quantum_first_run_multiarg_vector_executes() {
     let func_key = 123_456_790;
     register_quantum_jit(func_key, entries);
 
-    pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let locals = pyo3::types::PyDict::new(py);
         py.run(
-            "from array import array\n\
+            pyo3::ffi::c_str!(
+                "from array import array\n\
 prices = array('d', [100.0, 101.0, 102.0])\n\
 vols = array('d', [0.2, 0.2, 0.2])\n\
-strikes = array('d', [105.0, 105.0, 105.0])",
+strikes = array('d', [105.0, 105.0, 105.0])"
+            ),
             None,
-            Some(locals),
+            Some(&locals),
         )
         .unwrap();
 
-        let prices = locals.get_item("prices").unwrap();
-        let vols = locals.get_item("vols").unwrap();
-        let strikes = locals.get_item("strikes").unwrap();
+        let prices = locals.get_item("prices").unwrap().unwrap();
+        let vols = locals.get_item("vols").unwrap().unwrap();
+        let strikes = locals.get_item("strikes").unwrap().unwrap();
 
-        let tuple = pyo3::types::PyTuple::new(py, [prices, vols, strikes]);
-        let out_obj = execute_registered_jit(py, func_key, tuple)
+        let tuple = pyo3::types::PyTuple::new(py, [prices, vols, strikes]).unwrap();
+        let out_obj = execute_registered_jit(py, func_key, &tuple)
             .expect("quantum dispatcher should return a result")
             .expect("quantum first-run multiarg execution should succeed");
 
-        let out: Vec<f64> = out_obj.extract(py).unwrap();
+        let out: Vec<f64> = out_obj.bind(py).extract().unwrap();
         assert_eq!(out.len(), 3);
         assert!((out[0] - ((100.0 / 105.0) + 0.2)).abs() < 1e-12);
         assert!((out[1] - ((101.0 / 105.0) + 0.2)).abs() < 1e-12);
         assert!((out[2] - ((102.0 / 105.0) + 0.2)).abs() < 1e-12);
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 
     env::remove_var("IRIS_JIT_QUANTUM");
     reset_quantum_control_state();
@@ -1313,20 +1322,21 @@ fn compile_jit_range_step_and_predicate() {
 #[tokio::test]
 async fn compile_jit_python_api_call_tokio() {
     // same as above but run inside tokio's async test harness
-    pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let args = ["x".to_string(), "y".to_string()];
         let entry = compile_jit("x < y", &args).expect("compare");
-        let tuple = PyTuple::new(py, [1.0_f64, 2.0_f64]);
+        let tuple = pyo3::types::PyTuple::new(py, [1.0_f64, 2.0_f64]).unwrap();
         // sanity check tuple contents using safe API
         let a: f64 = tuple.get_item(0).unwrap().extract().unwrap();
         let b: f64 = tuple.get_item(1).unwrap().extract().unwrap();
         assert_eq!(a, 1.0);
         assert_eq!(b, 2.0);
-        let res_obj = execute_jit_func(py, &entry, tuple).expect("exec");
-        let res: f64 = res_obj.extract(py).unwrap();
+        let res_obj = execute_jit_func(py, &entry, &tuple).expect("exec");
+        let res: f64 = res_obj.bind(py).extract().unwrap();
         assert_eq!(res, 1.0);
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 }
 
 #[test]
@@ -1416,26 +1426,31 @@ fn compile_jit_mixed_chain_not_stress() {
 
 #[test]
 fn execute_jit_accepts_mixed_scalar_types() {
-    pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let args = ["x".to_string(), "y".to_string(), "z".to_string()];
         let entry = compile_jit("x + y + z", &args).expect("compile mixed scalar test");
         let tuple = PyTuple::new(
             py,
-            vec![1_i64.into_py(py), true.into_py(py), 2_i32.into_py(py)],
-        );
-        let result = execute_jit_func(py, &entry, tuple).expect("execute mixed scalars");
-        let out: f64 = result.extract(py).unwrap();
+            [
+                1_i64.into_py_any(py).unwrap(),
+                true.into_py_any(py).unwrap(),
+                2_i32.into_py_any(py).unwrap(),
+            ],
+        )
+        .unwrap();
+        let result = execute_jit_func(py, &entry, &tuple).expect("execute mixed scalars");
+        let out: f64 = result.bind(py).extract().unwrap();
         assert_eq!(out, 4.0);
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 }
 
 #[test]
 fn execute_jit_vectorizes_non_f64_buffers() {
-    let _guard = quantum_shared_test_lock().lock().unwrap();
-    pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| {
-        let array_mod = py.import("array").unwrap();
+    let _guard = lock_quantum_shared_test();
+    Python::attach(|py| {
+        let array_mod = py.import(pyo3::ffi::c_str!("array")).unwrap();
 
         let args = ["x".to_string()];
         let mul_entry = compile_jit("x * 2", &args).expect("compile f32 buffer test");
@@ -1444,10 +1459,10 @@ fn execute_jit_vectorizes_non_f64_buffers() {
             .unwrap()
             .call1(("f", vec![1.5_f32, 2.0_f32, -3.0_f32]))
             .unwrap();
-        let f32_tuple = PyTuple::new(py, [f32_in]);
-        let f32_out = execute_jit_func(py, &mul_entry, f32_tuple).expect("execute f32 buffer");
+        let f32_tuple = PyTuple::new(py, [f32_in]).unwrap();
+        let f32_out = execute_jit_func(py, &mul_entry, &f32_tuple).expect("execute f32 buffer");
         let f32_vals: Vec<f64> = f32_out
-            .as_ref(py)
+            .bind(py)
             .call_method0("tolist")
             .unwrap()
             .extract()
@@ -1460,126 +1475,153 @@ fn execute_jit_vectorizes_non_f64_buffers() {
             .unwrap()
             .call1(("i", vec![1_i32, 2_i32, 7_i32]))
             .unwrap();
-        let i32_tuple = PyTuple::new(py, [i32_in]);
-        let i32_out = execute_jit_func(py, &add_entry, i32_tuple).expect("execute i32 buffer");
+        let i32_tuple = PyTuple::new(py, [i32_in]).unwrap();
+        let i32_out = execute_jit_func(py, &add_entry, &i32_tuple).expect("execute i32 buffer");
         let i32_vals: Vec<f64> = i32_out
-            .as_ref(py)
+            .bind(py)
             .call_method0("tolist")
             .unwrap()
             .extract()
             .unwrap();
         assert_eq!(i32_vals, vec![2.0, 3.0, 8.0]);
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 }
 
 #[test]
 fn execute_jit_vectorizes_with_trailing_count() {
-    pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let args = ["x".to_string()];
         let entry = compile_jit("x * 2", &args).expect("compile trailing count vectorized test");
-        let tuple = PyTuple::new(py, [3.0_f64.into_py(py), 4_i64.into_py(py)]);
+        let tuple = PyTuple::new(
+            py,
+            [
+                3.0_f64.into_py_any(py).unwrap(),
+                4_i64.into_py_any(py).unwrap(),
+            ],
+        )
+        .unwrap();
         let out_obj =
-            execute_jit_func(py, &entry, tuple).expect("execute trailing count vectorized");
+            execute_jit_func(py, &entry, &tuple).expect("execute trailing count vectorized");
         let out: Vec<f64> = out_obj
-            .as_ref(py)
+            .bind(py)
             .call_method0("tolist")
             .unwrap()
             .extract()
             .unwrap();
         assert_eq!(out, vec![6.0, 6.0, 6.0, 6.0]);
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 }
 
 #[test]
 fn execute_jit_vectorize_with_negative_count_errors() {
-    pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let args = ["x".to_string()];
         let entry = compile_jit("x + 1", &args).expect("compile negative count test");
-        let tuple = PyTuple::new(py, [2.0_f64.into_py(py), (-1_i64).into_py(py)]);
-        let err = execute_jit_func(py, &entry, tuple).expect_err("negative count should error");
+        let tuple = PyTuple::new(
+            py,
+            [
+                2.0_f64.into_py_any(py).unwrap(),
+                (-1_i64).into_py_any(py).unwrap(),
+            ],
+        )
+        .unwrap();
+        let err = execute_jit_func(py, &entry, &tuple).expect_err("negative count should error");
         let msg = err.to_string();
         assert!(msg.contains("count"), "unexpected error message: {msg}");
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 }
 
 #[test]
 fn execute_jit_handles_unaligned_f64_buffer_vectorized() {
-    pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let locals = pyo3::types::PyDict::new(py);
         py.run(
-            "import struct\n\
+            pyo3::ffi::c_str!(
+                "import struct\n\
 buf=bytearray(1 + 8*3)\n\
 struct.pack_into('ddd', buf, 1, 1.0, 2.0, 3.0)\n\
-mv=memoryview(buf)[1:].cast('d')",
+mv=memoryview(buf)[1:].cast('d')"
+            ),
             None,
-            Some(locals),
+            Some(&locals),
         )
         .unwrap();
-        let mv = locals.get_item("mv").unwrap();
+        let mv = locals.get_item("mv").unwrap().unwrap();
 
         let args = ["x".to_string()];
         let entry = compile_jit("x * 2", &args).expect("compile unaligned vectorized test");
-        let tuple = PyTuple::new(py, [mv]);
-        let out_obj = execute_jit_func(py, &entry, tuple).expect("execute unaligned vectorized");
+        let tuple = PyTuple::new(py, [mv]).unwrap();
+        let out_obj = execute_jit_func(py, &entry, &tuple).expect("execute unaligned vectorized");
         let out: Vec<f64> = out_obj
-            .as_ref(py)
+            .bind(py)
             .call_method0("tolist")
             .unwrap()
             .extract()
             .unwrap();
         assert_eq!(out, vec![2.0, 4.0, 6.0]);
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 }
 
 #[test]
 fn execute_jit_handles_unaligned_f64_buffer_packed_args() {
-    pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let locals = pyo3::types::PyDict::new(py);
         py.run(
-            "import struct\n\
+            pyo3::ffi::c_str!(
+                "import struct\n\
 buf=bytearray(1 + 8*2)\n\
 struct.pack_into('dd', buf, 1, 1.0, 2.0)\n\
-mv=memoryview(buf)[1:].cast('d')",
+mv=memoryview(buf)[1:].cast('d')"
+            ),
             None,
-            Some(locals),
+            Some(&locals),
         )
         .unwrap();
-        let mv = locals.get_item("mv").unwrap();
+        let mv = locals.get_item("mv").unwrap().unwrap();
 
         let args = ["a".to_string(), "b".to_string()];
         let entry = compile_jit("a + b", &args).expect("compile unaligned packed test");
-        let tuple = PyTuple::new(py, [mv]);
-        let out_obj = execute_jit_func(py, &entry, tuple).expect("execute unaligned packed");
-        let out: f64 = out_obj.extract(py).unwrap();
+        let tuple = PyTuple::new(py, [mv]).unwrap();
+        let out_obj = execute_jit_func(py, &entry, &tuple).expect("execute unaligned packed");
+        let out: f64 = out_obj.bind(py).extract().unwrap();
         assert_eq!(out, 3.0);
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 }
 
 #[test]
 fn execute_jit_container_reductions_with_python_lists() {
-    pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let locals = pyo3::types::PyDict::new(py);
         let list_obj = py
-            .eval("[1.0, -2.0, 3.0, 0.0]", None, Some(locals))
+            .eval(
+                pyo3::ffi::c_str!("[1.0, -2.0, 3.0, 0.0]"),
+                None,
+                Some(&locals),
+            )
             .unwrap();
 
         let sum_entry = compile_jit("sum(x_i * x_i for x_i in x)", &["x".to_string()])
             .expect("sum container compile");
-        let sum_tuple = PyTuple::new(py, [list_obj]);
-        let sum_obj = execute_jit_func(py, &sum_entry, sum_tuple).expect("sum container execute");
-        let sum_val: f64 = sum_obj.extract(py).unwrap();
+        let sum_tuple = PyTuple::new(py, [list_obj.clone()]).unwrap();
+        let sum_obj = execute_jit_func(py, &sum_entry, &sum_tuple).expect("sum container execute");
+        let sum_val: f64 = sum_obj.bind(py).extract().unwrap();
         assert_eq!(sum_val, 14.0);
 
         let any_entry = compile_jit("any(x_i > 2 for x_i in x if x_i != 0)", &["x".to_string()])
             .expect("any container compile");
-        let any_tuple = PyTuple::new(py, [list_obj]);
-        let any_obj = execute_jit_func(py, &any_entry, any_tuple).expect("any container execute");
-        let any_val: f64 = any_obj.extract(py).unwrap();
+        let any_tuple = PyTuple::new(py, [list_obj.clone()]).unwrap();
+        let any_obj = execute_jit_func(py, &any_entry, &any_tuple).expect("any container execute");
+        let any_val: f64 = any_obj.bind(py).extract().unwrap();
         assert_eq!(any_val, 1.0);
 
         let all_entry = compile_jit(
@@ -1587,20 +1629,25 @@ fn execute_jit_container_reductions_with_python_lists() {
             &["x".to_string()],
         )
         .expect("all container compile");
-        let all_tuple = PyTuple::new(py, [list_obj]);
-        let all_obj = execute_jit_func(py, &all_entry, all_tuple).expect("all container execute");
-        let all_val: f64 = all_obj.extract(py).unwrap();
+        let all_tuple = PyTuple::new(py, [list_obj]).unwrap();
+        let all_obj = execute_jit_func(py, &all_entry, &all_tuple).expect("all container execute");
+        let all_val: f64 = all_obj.bind(py).extract().unwrap();
         assert_eq!(all_val, 1.0);
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 }
 
 #[test]
 fn execute_jit_container_reductions_with_loop_control_intrinsics() {
-    pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let locals = pyo3::types::PyDict::new(py);
         let list_obj = py
-            .eval("[1.0, 2.0, 3.0, 4.0, 5.0]", None, Some(locals))
+            .eval(
+                pyo3::ffi::c_str!("[1.0, 2.0, 3.0, 4.0, 5.0]"),
+                None,
+                Some(&locals),
+            )
             .unwrap();
 
         let sum_break = compile_jit(
@@ -1608,9 +1655,13 @@ fn execute_jit_container_reductions_with_loop_control_intrinsics() {
             &["x".to_string()],
         )
         .expect("sum break container compile");
-        let sum_break_obj = execute_jit_func(py, &sum_break, PyTuple::new(py, [list_obj]))
-            .expect("sum break container execute");
-        let sum_break_val: f64 = sum_break_obj.extract(py).unwrap();
+        let sum_break_obj = execute_jit_func(
+            py,
+            &sum_break,
+            &PyTuple::new(py, [list_obj.clone()]).unwrap(),
+        )
+        .expect("sum break container execute");
+        let sum_break_val: f64 = sum_break_obj.bind(py).extract().unwrap();
         assert_eq!(sum_break_val, 6.0);
 
         let sum_continue = compile_jit(
@@ -1618,9 +1669,13 @@ fn execute_jit_container_reductions_with_loop_control_intrinsics() {
             &["x".to_string()],
         )
         .expect("sum continue container compile");
-        let sum_continue_obj = execute_jit_func(py, &sum_continue, PyTuple::new(py, [list_obj]))
-            .expect("sum continue container execute");
-        let sum_continue_val: f64 = sum_continue_obj.extract(py).unwrap();
+        let sum_continue_obj = execute_jit_func(
+            py,
+            &sum_continue,
+            &PyTuple::new(py, [list_obj.clone()]).unwrap(),
+        )
+        .expect("sum continue container execute");
+        let sum_continue_val: f64 = sum_continue_obj.bind(py).extract().unwrap();
         assert_eq!(sum_continue_val, 9.0);
 
         let any_break = compile_jit(
@@ -1628,9 +1683,13 @@ fn execute_jit_container_reductions_with_loop_control_intrinsics() {
             &["x".to_string()],
         )
         .expect("any break container compile");
-        let any_break_obj = execute_jit_func(py, &any_break, PyTuple::new(py, [list_obj]))
-            .expect("any break container execute");
-        let any_break_val: f64 = any_break_obj.extract(py).unwrap();
+        let any_break_obj = execute_jit_func(
+            py,
+            &any_break,
+            &PyTuple::new(py, [list_obj.clone()]).unwrap(),
+        )
+        .expect("any break container execute");
+        let any_break_val: f64 = any_break_obj.bind(py).extract().unwrap();
         assert_eq!(any_break_val, 0.0);
 
         let all_continue = compile_jit(
@@ -1638,9 +1697,13 @@ fn execute_jit_container_reductions_with_loop_control_intrinsics() {
             &["x".to_string()],
         )
         .expect("all continue container compile");
-        let all_continue_obj = execute_jit_func(py, &all_continue, PyTuple::new(py, [list_obj]))
-            .expect("all continue container execute");
-        let all_continue_val: f64 = all_continue_obj.extract(py).unwrap();
+        let all_continue_obj = execute_jit_func(
+            py,
+            &all_continue,
+            &PyTuple::new(py, [list_obj.clone()]).unwrap(),
+        )
+        .expect("all continue container execute");
+        let all_continue_val: f64 = all_continue_obj.bind(py).extract().unwrap();
         assert_eq!(all_continue_val, 1.0);
 
         let sum_break_unless = compile_jit(
@@ -1648,10 +1711,13 @@ fn execute_jit_container_reductions_with_loop_control_intrinsics() {
             &["x".to_string()],
         )
         .expect("sum break_unless container compile");
-        let sum_break_unless_obj =
-            execute_jit_func(py, &sum_break_unless, PyTuple::new(py, [list_obj]))
-                .expect("sum break_unless container execute");
-        let sum_break_unless_val: f64 = sum_break_unless_obj.extract(py).unwrap();
+        let sum_break_unless_obj = execute_jit_func(
+            py,
+            &sum_break_unless,
+            &PyTuple::new(py, [list_obj.clone()]).unwrap(),
+        )
+        .expect("sum break_unless container execute");
+        let sum_break_unless_val: f64 = sum_break_unless_obj.bind(py).extract().unwrap();
         assert_eq!(sum_break_unless_val, 6.0);
 
         let sum_continue_unless = compile_jit(
@@ -1659,10 +1725,13 @@ fn execute_jit_container_reductions_with_loop_control_intrinsics() {
             &["x".to_string()],
         )
         .expect("sum continue_unless container compile");
-        let sum_continue_unless_obj =
-            execute_jit_func(py, &sum_continue_unless, PyTuple::new(py, [list_obj]))
-                .expect("sum continue_unless container execute");
-        let sum_continue_unless_val: f64 = sum_continue_unless_obj.extract(py).unwrap();
+        let sum_continue_unless_obj = execute_jit_func(
+            py,
+            &sum_continue_unless,
+            &PyTuple::new(py, [list_obj.clone()]).unwrap(),
+        )
+        .expect("sum continue_unless container execute");
+        let sum_continue_unless_val: f64 = sum_continue_unless_obj.bind(py).extract().unwrap();
         assert_eq!(sum_continue_unless_val, 9.0);
 
         let sum_break_when = compile_jit(
@@ -1670,10 +1739,13 @@ fn execute_jit_container_reductions_with_loop_control_intrinsics() {
             &["x".to_string()],
         )
         .expect("sum break_when container compile");
-        let sum_break_when_obj =
-            execute_jit_func(py, &sum_break_when, PyTuple::new(py, [list_obj]))
-                .expect("sum break_when container execute");
-        let sum_break_when_val: f64 = sum_break_when_obj.extract(py).unwrap();
+        let sum_break_when_obj = execute_jit_func(
+            py,
+            &sum_break_when,
+            &PyTuple::new(py, [list_obj.clone()]).unwrap(),
+        )
+        .expect("sum break_when container execute");
+        let sum_break_when_val: f64 = sum_break_when_obj.bind(py).extract().unwrap();
         assert_eq!(sum_break_when_val, 6.0);
 
         let sum_continue_when = compile_jit(
@@ -1681,10 +1753,13 @@ fn execute_jit_container_reductions_with_loop_control_intrinsics() {
             &["x".to_string()],
         )
         .expect("sum continue_when container compile");
-        let sum_continue_when_obj =
-            execute_jit_func(py, &sum_continue_when, PyTuple::new(py, [list_obj]))
-                .expect("sum continue_when container execute");
-        let sum_continue_when_val: f64 = sum_continue_when_obj.extract(py).unwrap();
+        let sum_continue_when_obj = execute_jit_func(
+            py,
+            &sum_continue_when,
+            &PyTuple::new(py, [list_obj.clone()]).unwrap(),
+        )
+        .expect("sum continue_when container execute");
+        let sum_continue_when_val: f64 = sum_continue_when_obj.bind(py).extract().unwrap();
         assert_eq!(sum_continue_when_val, 9.0);
 
         let sum_break_on_nan = compile_jit(
@@ -1692,10 +1767,13 @@ fn execute_jit_container_reductions_with_loop_control_intrinsics() {
             &["x".to_string()],
         )
         .expect("sum break_on_nan container compile");
-        let sum_break_on_nan_obj =
-            execute_jit_func(py, &sum_break_on_nan, PyTuple::new(py, [list_obj]))
-                .expect("sum break_on_nan container execute");
-        let sum_break_on_nan_val: f64 = sum_break_on_nan_obj.extract(py).unwrap();
+        let sum_break_on_nan_obj = execute_jit_func(
+            py,
+            &sum_break_on_nan,
+            &PyTuple::new(py, [list_obj.clone()]).unwrap(),
+        )
+        .expect("sum break_on_nan container execute");
+        let sum_break_on_nan_val: f64 = sum_break_on_nan_obj.bind(py).extract().unwrap();
         assert_eq!(sum_break_on_nan_val, 0.0);
 
         let sum_continue_on_nan = compile_jit(
@@ -1703,10 +1781,13 @@ fn execute_jit_container_reductions_with_loop_control_intrinsics() {
             &["x".to_string()],
         )
         .expect("sum continue_on_nan container compile");
-        let sum_continue_on_nan_obj =
-            execute_jit_func(py, &sum_continue_on_nan, PyTuple::new(py, [list_obj]))
-                .expect("sum continue_on_nan container execute");
-        let sum_continue_on_nan_val: f64 = sum_continue_on_nan_obj.extract(py).unwrap();
+        let sum_continue_on_nan_obj = execute_jit_func(
+            py,
+            &sum_continue_on_nan,
+            &PyTuple::new(py, [list_obj.clone()]).unwrap(),
+        )
+        .expect("sum continue_on_nan container execute");
+        let sum_continue_on_nan_val: f64 = sum_continue_on_nan_obj.bind(py).extract().unwrap();
         assert_eq!(sum_continue_on_nan_val, 0.0);
 
         let if_else_container = compile_jit(
@@ -1714,10 +1795,15 @@ fn execute_jit_container_reductions_with_loop_control_intrinsics() {
             &["x".to_string()],
         )
         .expect("if_else container compile");
-        let if_else_container_obj =
-            execute_jit_func(py, &if_else_container, PyTuple::new(py, [list_obj]))
-                .expect("if_else container execute");
-        let if_else_container_val: f64 = if_else_container_obj.extract(py).unwrap();
+        let if_else_container_obj = execute_jit_func(
+            py,
+            &if_else_container,
+            &PyTuple::new(py, [list_obj]).unwrap(),
+        )
+        .expect("if_else container execute");
+        let if_else_container_val: f64 = if_else_container_obj.bind(py).extract().unwrap();
         assert_eq!(if_else_container_val, 15.0);
-    });
+        Ok::<(), PyErr>(())
+    })
+    .unwrap();
 }

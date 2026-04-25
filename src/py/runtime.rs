@@ -425,6 +425,7 @@ impl PyRuntime {
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)
     }
 
+    #[pyo3(signature = (budget=100))]
     fn spawn_observed_handler(&self, budget: usize) -> u64 {
         self.inner.spawn_observed_handler(budget)
     }
@@ -990,6 +991,7 @@ impl PyRuntime {
     ///
     /// The returned PIDs are long-lived workers that reuse actor state,
     /// reducing per-task spawn/teardown overhead for pipeline workloads.
+    #[pyo3(signature = (parent, py_callable, workers, budget=100, release_gil=None))]
     fn spawn_child_pool(
         &self,
         parent: u64,
@@ -1293,11 +1295,14 @@ impl PyRuntime {
     }
 
     /// Schedule a one-shot send from Python. Returns a numeric timer id.
-    fn send_after(&self, pid: u64, delay_ms: u64, data: Bound<'_, PyAny>) -> PyResult<u64> {
+    #[pyo3(signature = (pid, data, delay))]
+    fn send_after(&self, pid: u64, data: Bound<'_, PyAny>, delay: f64) -> PyResult<u64> {
         let msg = py_any_to_bytes(&data)?;
-        let id = self
-            .inner
-            .send_after(pid, delay_ms, crate::mailbox::Message::User(msg));
+        let id = self.inner.send_after(
+            pid,
+            (delay * 1000.0) as u64,
+            crate::mailbox::Message::User(msg),
+        );
         Ok(id)
     }
 
@@ -1434,13 +1439,24 @@ impl PyRuntime {
     }
 
     /// Retrieve runtime-wide metrics.
-    fn get_metrics(&self) -> PyResult<std::collections::HashMap<String, u64>> {
+    fn metrics(&self) -> PyResult<std::collections::HashMap<String, u64>> {
         let mut m = std::collections::HashMap::new();
         let tel = self.inner.telemetry();
-        m.insert("actor_count".to_string(), tel.get_actor_count());
-        m.insert("messages_sent".to_string(), tel.get_messages_sent());
-        m.insert("messages_received".to_string(), tel.get_messages_received());
+        let count = tel.get_actor_count();
+        let sent = tel.get_messages_sent();
+        let recv = tel.get_messages_received();
+
+        m.insert("actor_count".to_string(), count);
+        m.insert("active_actors".to_string(), count);
+        m.insert("messages_sent".to_string(), sent);
+        m.insert("messages_received".to_string(), recv);
+        m.insert("messages_processed".to_string(), recv);
         Ok(m)
+    }
+
+    /// Alias for metrics for backward compatibility.
+    fn get_metrics(&self) -> PyResult<std::collections::HashMap<String, u64>> {
+        self.metrics()
     }
 
     fn set_system_capacity(&self, cap: u64) {
