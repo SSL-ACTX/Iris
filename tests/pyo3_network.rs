@@ -1,3 +1,5 @@
+#![cfg(feature = "pyo3")]
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::time::Duration;

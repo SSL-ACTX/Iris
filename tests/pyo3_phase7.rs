@@ -1,3 +1,5 @@
+#![cfg(feature = "pyo3")]
+
 use pyo3::prelude::*;
 use std::time::Duration;
 

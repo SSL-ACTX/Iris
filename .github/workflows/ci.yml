@@ -37,7 +37,7 @@ jobs:
           RUST_BACKTRACE: 1
         run: cargo test --workspace --verbose --no-default-features
 
-      - name: Run Tests (PyO3,JIT,Vortex)
+      - name: Run Tests (PyO3,Vortex)
         env:
           RUST_BACKTRACE: 1
-        run: cargo test --workspace --verbose --no-default-features --features=pyo3,jit
+        run: cargo test --workspace --verbose --no-default-features --features=pyo3,vortex
