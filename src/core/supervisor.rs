@@ -354,6 +354,7 @@ impl Runtime {
         reason: mailbox::ExitReason,
         meta: Option<String>,
     ) {
+        let linked = supervisor.linked_pids(pid);
         mailboxes.remove(&pid);
         supervisor.notify_exit(pid, &reason);
         for entry in path_supervisors.iter() {
@@ -383,7 +384,6 @@ impl Runtime {
         // structured concurrency cleanup + runtime metadata cleanup
         rt_exit.handle_exit_internal(pid);
 
-        let linked = supervisor.linked_pids(pid);
         for lp in linked {
             if let Some(sender) = mailboxes.get(&lp) {
                 let info = mailbox::ExitInfo {

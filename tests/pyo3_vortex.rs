@@ -2,10 +2,19 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use std::sync::OnceLock;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio::time::{sleep, timeout, Duration};
+
+static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+async fn lock_vortex_test() -> MutexGuard<'static, ()> {
+    TEST_LOCK.get_or_init(|| Mutex::new(())).lock().await
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_ocular_api_is_exposed() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -22,6 +31,7 @@ async fn test_vortex_ocular_api_is_exposed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_ocular_start_stop_tracing_smoke() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
         let sys = py.import(pyo3::ffi::c_str!("sys")).unwrap();
@@ -92,6 +102,7 @@ _r = ocular_smoke(64)
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_ocular_captures_non_hot_paths() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
         let sys = py.import(pyo3::ffi::c_str!("sys")).unwrap();
@@ -154,6 +165,7 @@ _x = straight_path(7, 5)
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_ocular_callbacks_smoke() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -208,6 +220,7 @@ def cb_target():
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_preemption_on_while_true() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -282,6 +295,7 @@ def endless():
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_opcode_metadata_unavailable() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -367,6 +381,7 @@ def sample():
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_quickening_metadata_unavailable() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -453,6 +468,7 @@ def sample2():
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_original_cache_layout_invalid() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -555,6 +571,7 @@ def sample3(x):
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_stack_depth_invariant_failed() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -653,6 +670,7 @@ fn.__code__ = fn.__code__.replace(co_stacksize=1)
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_exception_table_invalid() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -727,6 +745,7 @@ def sample_exc():
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_exception_table_metadata_unavailable() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -810,6 +829,7 @@ def sample_exc_meta_unavailable():
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_patched_exception_table_invalid() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -908,6 +928,7 @@ def sample_patched_exc():
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_probe_extraction_failed() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -983,6 +1004,7 @@ def sample_probe_fail():
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_probe_instrumentation_failed() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -1081,6 +1103,7 @@ def sample_probe_instrumentation_fail():
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_patched_stack_metadata_unavailable() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -1182,6 +1205,7 @@ def sample_patched_stack_metadata_unavailable():
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_patched_exception_table_metadata_unavailable() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -1283,6 +1307,7 @@ def sample_patched_exception_table_metadata_unavailable():
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_code_replace_failed() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -1378,6 +1403,7 @@ def sample_code_replace_fail():
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_types_module_unavailable() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -1473,6 +1499,7 @@ def sample_types_unavailable():
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_shadow_function_construction_failed() {
+    let _lock = lock_vortex_test().await;
     Python::attach(|py| {
         let m = iris::py::make_module(py).unwrap();
 
@@ -1571,6 +1598,7 @@ def sample_shadow_construction_fail():
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pyruntime_vortex_auto_policy_and_telemetry() {
+    let _lock = lock_vortex_test().await;
     let rt_py = Python::attach(|py| {
         let module = iris::py::make_module(py).expect("make_module");
         let runtime_type = module.getattr("PyRuntime").expect("no PyRuntime type");
@@ -1705,6 +1733,7 @@ async fn test_pyruntime_vortex_auto_policy_and_telemetry() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pyruntime_vortex_auto_policy_rejects_invalid_value() {
+    let _lock = lock_vortex_test().await;
     let rt_py = Python::attach(|py| {
         let module = iris::py::make_module(py).expect("make_module");
         let runtime_type = module.getattr("PyRuntime").expect("no PyRuntime type");
@@ -1726,6 +1755,7 @@ async fn test_pyruntime_vortex_auto_policy_rejects_invalid_value() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pyruntime_vortex_genetic_budgeting_toggle() {
+    let _lock = lock_vortex_test().await;
     let rt_py = Python::attach(|py| {
         let module = iris::py::make_module(py).expect("make_module");
         let runtime_type = module.getattr("PyRuntime").expect("no PyRuntime type");
@@ -1776,6 +1806,7 @@ async fn test_pyruntime_vortex_genetic_budgeting_toggle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pyruntime_vortex_genetic_threshold_roundtrip() {
+    let _lock = lock_vortex_test().await;
     let rt_py = Python::attach(|py| {
         let module = iris::py::make_module(py).expect("make_module");
         let runtime_type = module.getattr("PyRuntime").expect("no PyRuntime type");
@@ -1819,6 +1850,7 @@ async fn test_pyruntime_vortex_genetic_threshold_roundtrip() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pyruntime_vortex_watchdog_toggle() {
+    let _lock = lock_vortex_test().await;
     let rt_py = Python::attach(|py| {
         let module = iris::py::make_module(py).expect("make_module");
         let runtime_type = module.getattr("PyRuntime").expect("no PyRuntime type");
@@ -1870,6 +1902,7 @@ async fn test_pyruntime_vortex_watchdog_toggle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pyruntime_vortex_isolation_disallow_ops() {
+    let _lock = lock_vortex_test().await;
     let rt_py = Python::attach(|py| {
         let module = iris::py::make_module(py).expect("make_module");
         let runtime_type = module.getattr("PyRuntime").expect("no PyRuntime type");
@@ -1912,6 +1945,7 @@ async fn test_pyruntime_vortex_isolation_disallow_ops() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pyruntime_vortex_isolation_mode_store_blocking() {
+    let _lock = lock_vortex_test().await;
     let rt_py = Python::attach(|py| {
         let module = iris::py::make_module(py).expect("make_module");
         let runtime_type = module.getattr("PyRuntime").expect("no PyRuntime type");
@@ -1964,6 +1998,7 @@ async fn test_pyruntime_vortex_isolation_mode_store_blocking() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pyruntime_vortex_genetic_history_pickup_and_reset() {
+    let _lock = lock_vortex_test().await;
     let rt_py = Python::attach(|py| {
         let module = iris::py::make_module(py).expect("make_module");
         let runtime_type = module.getattr("PyRuntime").expect("no PyRuntime type");
