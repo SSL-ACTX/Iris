@@ -3,4 +3,3 @@
 test-fast = "test --no-default-features --lib"
 test-backpressure = "test --no-default-features --lib backpressure -- --nocapture"
 # Fast local test cycle for vortex experimental feature.
-test-vortex = "test --no-default-features --features vortex --lib -- --nocapture"

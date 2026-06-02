@@ -19,7 +19,6 @@ Key design decisions & why
 
 Developer workflows (essential commands)
 - Build & test: `cargo test` (CI runs the same). Run entire workspace with `cargo test --manifest-path ./Cargo.toml`.
-- Fast local test alias (defined in `.cargo/config.toml`): `cargo test-fast`, and for Vortex branch: `cargo test-vortex`.
 - Run example: `cargo run --example basic`.
 - Format: `cargo fmt` (project has `rustfmt.toml`).
 - CI: `.github/workflows/ci.yml` runs `cargo test` on push/PR.

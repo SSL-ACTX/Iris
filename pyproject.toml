@@ -18,3 +18,4 @@ dependencies = ["msgpack>=1"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+manifest-path = "crates/py/Cargo.toml"

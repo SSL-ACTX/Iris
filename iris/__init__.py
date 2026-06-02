@@ -1,21 +1,6 @@
 # iris/__init__.py
 import asyncio
 from typing import Optional, Callable, Union, Awaitable, Iterable
-from .jit import (
-    offload,
-    set_jit_logging,
-    get_jit_logging,
-    set_quantum_speculation,
-    get_quantum_speculation,
-    set_quantum_speculation_threshold,
-    get_quantum_speculation_threshold,
-    set_quantum_log_threshold,
-    get_quantum_log_threshold,
-    set_quantum_compile_budget,
-    get_quantum_compile_budget,
-    set_quantum_cooldown,
-    get_quantum_cooldown,
-)
 
 try:
     from .iris import (
@@ -25,7 +10,6 @@ try:
         version,
         allocate_buffer,
         PyMailbox,
-        register_offload,
     )
 except ImportError:
     from iris import (
@@ -35,7 +19,6 @@ except ImportError:
         version,
         allocate_buffer,
         PyMailbox,
-        register_offload,
     )
 
 
@@ -498,18 +481,4 @@ __all__ = [
     "version",
     "allocate_buffer",
     "PyMailbox",
-    "register_offload",
-    "offload",
-    "set_jit_logging",
-    "get_jit_logging",
-    "set_quantum_speculation",
-    "get_quantum_speculation",
-    "set_quantum_speculation_threshold",
-    "get_quantum_speculation_threshold",
-    "set_quantum_log_threshold",
-    "get_quantum_log_threshold",
-    "set_quantum_compile_budget",
-    "get_quantum_compile_budget",
-    "set_quantum_cooldown",
-    "get_quantum_cooldown",
 ]

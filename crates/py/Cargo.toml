@@ -1,0 +1,29 @@
+[package]
+name = "iris"
+version = "0.5.0"
+edition = "2021"
+description = "Iris — Python bindings"
+license = "AGPL-3.0"
+repository = "https://github.com/SSL-ACTX/iris"
+
+[lib]
+name = "iris"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+iris-core = { path = "../core" }
+pyo3 = { version = "0.28.3", features = ["auto-initialize"] }
+pyo3-async-runtimes = { version = "0.28.0", features = ["tokio-runtime"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+tracing = "0.1"
+bytes = "1.11.1"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dev-dependencies]
+futures = "0.3"
+tracing-subscriber = "0.3"
